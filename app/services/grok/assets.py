@@ -564,6 +564,19 @@ class DownloadService(BaseService):
         """
         async with _get_assets_semaphore():
             try:
+                # 兼容上游返回的完整 URL：只保留 path 部分
+                if self.is_url(file_path):
+                    try:
+                        parsed = urlparse(file_path)
+                        if parsed.path:
+                            file_path = parsed.path
+                    except Exception:
+                        pass
+
+                # 去掉可能存在的 querystring，避免生成错误文件名/请求路径
+                if "?" in file_path:
+                    file_path = file_path.split("?", 1)[0]
+
                 cache_path = self._cache_path(file_path, media_type)
                 
                 # 如果已缓存

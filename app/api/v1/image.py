@@ -14,6 +14,7 @@ from app.services.grok.chat import GrokChatService
 from app.services.grok.model import ModelService
 from app.services.grok.processor import ImageStreamProcessor, ImageCollectProcessor
 from app.services.token import get_token_manager
+from app.core.config import get_config
 from app.core.exceptions import ValidationException, AppException, ErrorType
 from app.core.logger import logger
 
@@ -70,10 +71,36 @@ def validate_request(request: ImageGenerationRequest):
             code="invalid_stream_n"
         )
 
+    # response_format（仅当用户显式传入时校验）
+    if hasattr(request, "model_fields_set") and "response_format" in request.model_fields_set:
+        if request.response_format and request.response_format not in {"b64_json", "url"}:
+            raise ValidationException(
+                message="response_format must be 'b64_json' or 'url'",
+                param="response_format",
+                code="invalid_response_format"
+            )
 
-async def call_grok(token: str, prompt: str, model_info) -> List[str]:
+
+def resolve_response_format(request: ImageGenerationRequest) -> str:
     """
-    调用 Grok 获取图片，返回 base64 列表
+    解析输出格式：
+    - 优先使用请求中的 response_format（若用户显式传入）
+    - 否则使用配置 app.image_format（url/base64）
+    """
+    if hasattr(request, "model_fields_set") and "response_format" in request.model_fields_set:
+        fmt = (request.response_format or "").strip().lower()
+        if fmt in {"b64_json", "url"}:
+            return fmt
+
+    cfg = str(get_config("app.image_format", "url") or "").strip().lower()
+    if cfg in {"base64", "b64_json"}:
+        return "b64_json"
+    return "url"
+
+
+async def call_grok(token: str, prompt: str, model_info, output_format: str) -> List[str]:
+    """
+    调用 Grok 获取图片，返回 base64 或 url 列表
     """
     chat_service = GrokChatService()
     
@@ -88,7 +115,7 @@ async def call_grok(token: str, prompt: str, model_info) -> List[str]:
         )
         
         # 收集图片
-        processor = ImageCollectProcessor(model_info.model_id, token)
+        processor = ImageCollectProcessor(model_info.model_id, token, output_format=output_format)
         images = await processor.process(response)
         return images
         
@@ -115,6 +142,8 @@ async def create_image(request: ImageGenerationRequest):
     
     # 参数验证
     validate_request(request)
+
+    output_format = resolve_response_format(request)
     
     # 获取 token
     try:
@@ -153,7 +182,7 @@ async def create_image(request: ImageGenerationRequest):
             stream=True
         )
         
-        processor = ImageStreamProcessor(model_info.model_id, token, n=request.n)
+        processor = ImageStreamProcessor(model_info.model_id, token, n=request.n, output_format=output_format)
         return StreamingResponse(
             processor.process(response),
             media_type="text/event-stream",
@@ -167,11 +196,11 @@ async def create_image(request: ImageGenerationRequest):
     
     if calls_needed == 1:
         # 单次调用
-        all_images = await call_grok(token, request.prompt, model_info)
+        all_images = await call_grok(token, request.prompt, model_info, output_format)
     else:
         # 并发调用
         tasks = [
-            call_grok(token, request.prompt, model_info)
+            call_grok(token, request.prompt, model_info, output_format)
             for _ in range(calls_needed)
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -195,7 +224,10 @@ async def create_image(request: ImageGenerationRequest):
     
     # 构建响应
     import time
-    data = [{"b64_json": img} for img in selected_images]
+    if output_format == "url":
+        data = [{"url": img} for img in selected_images]
+    else:
+        data = [{"b64_json": img} for img in selected_images]
     
     return JSONResponse(content={
         "created": int(time.time()),

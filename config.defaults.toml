@@ -10,6 +10,9 @@ asset_proxy_url = ""
 cf_clearance = ""
 max_retry = 3
 retry_status_codes = [401,429,403]
+nsfw_feature_key = "always_show_nsfw_content"
+nsfw_apply_concurrency = 5
+nsfw_apply_delay_ms = 500
 
 [app]
 app_url = "http://127.0.0.1:8000"

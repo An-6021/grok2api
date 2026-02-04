@@ -7,14 +7,17 @@ filter_tags = ["xaiartifact","xai:tool_usage_card","grok:render"]
 timeout = 120
 base_proxy_url = ""
 asset_proxy_url = ""
-cf_clearance = ""
+cf_clearance = "cKT2BsgEjI32f2G5le46kBsWwnlL5yJULNt6pMsmBu0-1770192411-1.2.1.1-bQKVYJpgqDnuZImfaxRnnU1ut6qIFI3JZJFsFdLDkgjq6EvJJExgqfir70bQjYUpI.OmDu6ekPAx7Tn1dRFjDXgET.HZ6fjK.wa6YIgZzSOKkfB9qQdeAG_5aHulZKnvluKFNYfIts9a9G4GU06TlMRnljT7Wx6OZ0Oc.QUT0xGYTQOBeAplH9PIa56Ov_1J9R8Ef4WPVrirNFZtRtvvcYENjrNpsPmc4Mqw_1w7YC0"
 max_retry = 3
 retry_status_codes = [401,429,403]
+nsfw_feature_key = "always_show_nsfw_content"
+nsfw_apply_concurrency = 5
+nsfw_apply_delay_ms = 500
 
 [app]
 app_url = "http://127.0.0.1:8000"
-app_key = "grok2api"
-api_key = ""
+app_key = "admin"
+api_key = "123"
 image_format = "url"
 video_format = "url"
 

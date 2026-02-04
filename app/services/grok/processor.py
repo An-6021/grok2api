@@ -401,11 +401,12 @@ class VideoCollectProcessor(BaseProcessor):
 class ImageStreamProcessor(BaseProcessor):
     """图片生成流式响应处理器"""
     
-    def __init__(self, model: str, token: str = "", n: int = 1):
+    def __init__(self, model: str, token: str = "", n: int = 1, output_format: str = "b64_json"):
         super().__init__(model, token)
         self.partial_index = 0
         self.n = n
         self.target_index = random.randint(0, 1) if n == 1 else None
+        self.output_format = output_format if output_format in {"b64_json", "url"} else "b64_json"
     
     def _sse(self, event: str, data: dict) -> str:
         """构建 SSE 响应 (覆盖基类)"""
@@ -413,7 +414,7 @@ class ImageStreamProcessor(BaseProcessor):
     
     async def process(self, response: AsyncIterable[bytes]) -> AsyncGenerator[str, None]:
         """处理流式响应"""
-        final_images = []
+        final_items: List[str] = []
         
         try:
             async for line in response:
@@ -439,6 +440,7 @@ class ImageStreamProcessor(BaseProcessor):
                     yield self._sse("image_generation.partial_image", {
                         "type": "image_generation.partial_image",
                         "b64_json": "",
+                        "url": "",
                         "index": out_index,
                         "progress": progress
                     })
@@ -448,27 +450,32 @@ class ImageStreamProcessor(BaseProcessor):
                 if mr := resp.get("modelResponse"):
                     if urls := mr.get("generatedImageUrls"):
                         for url in urls:
-                            dl_service = self._get_dl()
-                            base64_data = await dl_service.to_base64(url, self.token, "image")
-                            if base64_data:
-                                if "," in base64_data:
-                                    b64 = base64_data.split(",", 1)[1]
-                                else:
-                                    b64 = base64_data
-                                final_images.append(b64)
+                            if self.output_format == "url":
+                                final_url = await self.process_url(url, "image")
+                                final_items.append(final_url)
+                            else:
+                                dl_service = self._get_dl()
+                                base64_data = await dl_service.to_base64(url, self.token, "image")
+                                if base64_data:
+                                    if "," in base64_data:
+                                        b64 = base64_data.split(",", 1)[1]
+                                    else:
+                                        b64 = base64_data
+                                    final_items.append(b64)
                     continue
                     
-            for index, b64 in enumerate(final_images):
+            for index, item in enumerate(final_items):
                 if self.n == 1:
                     if index != self.target_index:
                         continue
                     out_index = 0
                 else:
                     out_index = index
-                
-                yield self._sse("image_generation.completed", {
+
+                payload = {
                     "type": "image_generation.completed",
-                    "b64_json": b64,
+                    "b64_json": "" if self.output_format == "url" else item,
+                    "url": item if self.output_format == "url" else "",
                     "index": out_index,
                     "usage": {
                         "total_tokens": 50,
@@ -476,7 +483,8 @@ class ImageStreamProcessor(BaseProcessor):
                         "output_tokens": 25,
                         "input_tokens_details": {"text_tokens": 5, "image_tokens": 20}
                     }
-                })
+                }
+                yield self._sse("image_generation.completed", payload)
         except Exception as e:
             logger.error(f"Image stream processing error: {e}")
             raise
@@ -487,8 +495,9 @@ class ImageStreamProcessor(BaseProcessor):
 class ImageCollectProcessor(BaseProcessor):
     """图片生成非流式响应处理器"""
     
-    def __init__(self, model: str, token: str = ""):
+    def __init__(self, model: str, token: str = "", output_format: str = "b64_json"):
         super().__init__(model, token)
+        self.output_format = output_format if output_format in {"b64_json", "url"} else "b64_json"
     
     async def process(self, response: AsyncIterable[bytes]) -> List[str]:
         """处理并收集图片"""
@@ -508,14 +517,18 @@ class ImageCollectProcessor(BaseProcessor):
                 if mr := resp.get("modelResponse"):
                     if urls := mr.get("generatedImageUrls"):
                         for url in urls:
-                            dl_service = self._get_dl()
-                            base64_data = await dl_service.to_base64(url, self.token, "image")
-                            if base64_data:
-                                if "," in base64_data:
-                                    b64 = base64_data.split(",", 1)[1]
-                                else:
-                                    b64 = base64_data
-                                images.append(b64)
+                            if self.output_format == "url":
+                                final_url = await self.process_url(url, "image")
+                                images.append(final_url)
+                            else:
+                                dl_service = self._get_dl()
+                                base64_data = await dl_service.to_base64(url, self.token, "image")
+                                if base64_data:
+                                    if "," in base64_data:
+                                        b64 = base64_data.split(",", 1)[1]
+                                    else:
+                                        b64 = base64_data
+                                    images.append(b64)
                                 
         except Exception as e:
             logger.error(f"Image collect processing error: {e}")

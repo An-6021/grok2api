@@ -12,7 +12,9 @@ const NUMERIC_FIELDS = new Set([
   'usage_max_concurrent',
   'assets_delete_batch_size',
   'admin_assets_batch_size',
-  'reload_interval_sec'
+  'reload_interval_sec',
+  'nsfw_apply_concurrency',
+  'nsfw_apply_delay_ms'
 ]);
 
 const LOCALE_MAP = {
@@ -36,7 +38,10 @@ const LOCALE_MAP = {
     "asset_proxy_url": { title: "资源代理 URL", desc: "代理请求到 Grok 官网的静态资源（图片/视频）地址。" },
     "cf_clearance": { title: "CF Clearance", desc: "Cloudflare 验证 Cookie，用于验证 Cloudflare 的验证。" },
     "max_retry": { title: "最大重试", desc: "请求 Grok 服务失败时的最大重试次数。" },
-    "retry_status_codes": { title: "重试状态码", desc: "触发重试的 HTTP 状态码列表。" }
+    "retry_status_codes": { title: "重试状态码", desc: "触发重试的 HTTP 状态码列表。" },
+    "nsfw_feature_key": { title: "NSFW 功能 Key", desc: "UpdateUserFeatureControls 的 feature key（默认 always_show_nsfw_content）。" },
+    "nsfw_apply_concurrency": { title: "NSFW 批量并发", desc: "管理页批量开启 NSFW 的并发数量。" },
+    "nsfw_apply_delay_ms": { title: "NSFW 批量延迟", desc: "批量开启时每个请求后的延迟（毫秒），用于降低风控/限流风险。" }
   },
   "token": {
     "label": "Token 池设置",
@@ -268,6 +273,7 @@ function renderConfig(data) {
       container.appendChild(card);
     }
   });
+
 }
 
 async function saveConfig() {

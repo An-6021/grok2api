@@ -133,6 +133,87 @@ async def refresh_tokens_api(data: dict):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.post("/api/v1/admin/tokens/nsfw", dependencies=[Depends(verify_api_key)])
+async def set_tokens_nsfw_api(data: dict):
+    """
+    批量开启/关闭 NSFW (always_show_nsfw_content)。
+
+    Body:
+      - enabled: bool (default true)
+      - feature_key: str (default from config grok.nsfw_feature_key)
+      - scope: "all" | None
+      - token: str | None
+      - tokens: [str] | None
+    """
+    from app.services.grok.feature_controls import FeatureControlsService
+    from app.services.token.manager import get_token_manager
+
+    enabled = bool(data.get("enabled", True))
+    feature_key = str(data.get("feature_key") or get_config("grok.nsfw_feature_key", "always_show_nsfw_content"))
+
+    tokens: list[str] = []
+    if isinstance(data.get("token"), str) and data.get("token").strip():
+        tokens.append(data["token"].strip())
+
+    if isinstance(data.get("tokens"), list):
+        tokens.extend([t.strip() for t in data["tokens"] if isinstance(t, str) and t.strip()])
+
+    if not tokens and data.get("scope") == "all":
+        mgr = await get_token_manager()
+        for pool in mgr.pools.values():
+            for info in pool.list():
+                raw = info.token[4:] if info.token.startswith("sso=") else info.token
+                if raw:
+                    tokens.append(raw)
+
+    if not tokens:
+        raise HTTPException(status_code=400, detail="No tokens provided")
+
+    # unique (preserve order)
+    seen = set()
+    unique_tokens: list[str] = []
+    for t in tokens:
+        if t in seen:
+            continue
+        seen.add(t)
+        unique_tokens.append(t)
+
+    concurrency = get_config("grok.nsfw_apply_concurrency", 5)
+    delay_ms = get_config("grok.nsfw_apply_delay_ms", 500)
+    try:
+        concurrency = int(concurrency)
+    except Exception:
+        concurrency = 5
+    try:
+        delay_ms = float(delay_ms)
+    except Exception:
+        delay_ms = 500.0
+    concurrency = max(1, concurrency)
+    delay_ms = max(0.0, delay_ms)
+
+    sem = asyncio.Semaphore(concurrency)
+    svc = FeatureControlsService()
+
+    async def _apply_one(t: str):
+        async with sem:
+            ok, msg = await svc.update_user_feature_control(t, feature_key, enabled=enabled)
+            if delay_ms > 0:
+                await asyncio.sleep(delay_ms / 1000.0)
+            return t, {"ok": ok, "message": msg}
+
+    results_list = await asyncio.gather(*[_apply_one(t) for t in unique_tokens])
+    results = dict(results_list)
+    success_count = sum(1 for r in results.values() if r.get("ok"))
+    fail_count = len(results) - success_count
+
+    return {
+        "status": "success",
+        "enabled": enabled,
+        "feature_key": feature_key,
+        "summary": {"total": len(results), "success": success_count, "fail": fail_count},
+        "results": results,
+    }
+
 @router.get("/admin/cache", response_class=HTMLResponse, include_in_schema=False)
 async def admin_cache_page():
     """缓存管理页"""

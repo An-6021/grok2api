@@ -171,6 +171,9 @@ curl http://localhost:8000/v1/images/generations \
 |                       | `cf_clearance`             | CF Clearance | Cloudflare 验证 Cookie，用于验证 Cloudflare 的验证。 | `""`                                                    |
 |                       | `max_retry`                | 最大重试     | 请求 Grok 服务失败时的最大重试次数。                 | `3`                                                     |
 |                       | `retry_status_codes`       | 重试状态码   | 触发重试的 HTTP 状态码列表。                         | `[401, 429, 403]`                                       |
+|                       | `nsfw_feature_key`         | NSFW 功能 Key | UpdateUserFeatureControls 的 feature key（默认 always_show_nsfw_content）。 | `always_show_nsfw_content` |
+|                       | `nsfw_apply_concurrency`   | NSFW 批量并发 | 管理页批量开启 NSFW 的并发数量。 | `5` |
+|                       | `nsfw_apply_delay_ms`      | NSFW 批量延迟 | 批量开启时每个请求后的延迟（毫秒），用于降低风控/限流风险。 | `500` |
 | **token**       | `auto_refresh`             | 自动刷新     | 是否开启 Token 自动刷新机制。                        | `true`                                                  |
 |                       | `refresh_interval_hours`   | 刷新间隔     | Token 刷新的时间间隔（小时）。                       | `8`                                                     |
 |                       | `fail_threshold`           | 失败阈值     | 单个 Token 连续失败多少次后被标记为不可用。          | `5`                                                     |

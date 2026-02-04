@@ -563,6 +563,8 @@ function toggleBatchPause() {
   if (!isBatchPaused) {
     if (currentBatchAction === 'refresh') {
       processBatchQueue();
+    } else if (currentBatchAction === 'nsfw') {
+      processNsfwQueue();
     } else if (currentBatchAction === 'delete') {
       processDeleteQueue();
     }
@@ -587,14 +589,84 @@ function finishBatchProcess(aborted = false) {
   loadData(); // Final data refresh
 
   if (aborted) {
-    showToast(action === 'delete' ? '已终止删除' : '已终止刷新', 'info');
+    if (action === 'delete') showToast('已终止删除', 'info');
+    else if (action === 'nsfw') showToast('已终止 NSFW 操作', 'info');
+    else showToast('已终止刷新', 'info');
   } else {
-    showToast(action === 'delete' ? '删除完成' : '刷新完成', 'success');
+    if (action === 'delete') showToast('删除完成', 'success');
+    else if (action === 'nsfw') showToast('NSFW 完成', 'success');
+    else showToast('刷新完成', 'success');
   }
 }
 
 async function batchUpdate() {
   startBatchRefresh();
+}
+
+async function batchEnableNsfw() {
+  startBatchNsfw();
+}
+
+async function startBatchNsfw() {
+  if (isBatchProcessing) {
+    showToast('当前有任务进行中', 'info');
+    return;
+  }
+
+  const selected = flatTokens.filter(t => t._selected);
+  if (selected.length === 0) return showToast("未选择 Token", 'error');
+
+  const ok = await confirmAction(`确定要对选中的 ${selected.length} 个 Token 一键开启 NSFW 吗？`, { okText: '开启' });
+  if (!ok) return;
+
+  isBatchProcessing = true;
+  isBatchPaused = false;
+  currentBatchAction = 'nsfw';
+  batchQueue = selected.map(t => t.token);
+  batchTotal = batchQueue.length;
+  batchProcessed = 0;
+
+  updateBatchProgress();
+  setActionButtonsState();
+  processNsfwQueue();
+}
+
+async function processNsfwQueue() {
+  if (!isBatchProcessing || isBatchPaused || currentBatchAction !== 'nsfw') return;
+
+  if (batchQueue.length === 0) {
+    finishBatchProcess();
+    return;
+  }
+
+  const chunk = batchQueue.splice(0, BATCH_SIZE);
+
+  try {
+    const res = await fetch('/api/v1/admin/tokens/nsfw', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...buildAuthHeaders(apiKey)
+      },
+      body: JSON.stringify({ tokens: chunk, enabled: true })
+    });
+
+    if (res.ok) {
+      batchProcessed += chunk.length;
+    } else {
+      showToast('部分 NSFW 操作失败', 'error');
+      batchProcessed += chunk.length;
+    }
+  } catch (e) {
+    showToast('网络请求错误', 'error');
+    batchProcessed += chunk.length;
+  }
+
+  updateBatchProgress();
+  if (!isBatchProcessing || isBatchPaused) return;
+  setTimeout(() => {
+    processNsfwQueue();
+  }, 400);
 }
 
 function updateBatchProgress() {
@@ -624,9 +696,11 @@ function setActionButtonsState() {
   const disabled = isBatchProcessing;
   const exportBtn = document.getElementById('btn-batch-export');
   const updateBtn = document.getElementById('btn-batch-update');
+  const nsfwBtn = document.getElementById('btn-batch-nsfw');
   const deleteBtn = document.getElementById('btn-batch-delete');
   if (exportBtn) exportBtn.disabled = disabled || selectedCount === 0;
   if (updateBtn) updateBtn.disabled = disabled || selectedCount === 0;
+  if (nsfwBtn) nsfwBtn.disabled = disabled || selectedCount === 0;
   if (deleteBtn) deleteBtn.disabled = disabled || selectedCount === 0;
 }
 
