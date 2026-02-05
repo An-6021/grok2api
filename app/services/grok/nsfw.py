@@ -59,14 +59,16 @@ class NSFWService:
             "cookie": cookie,
         }
 
-    @staticmethod
-    def _build_payload() -> bytes:
-        """构造请求 payload"""
+    def _build_payload(self) -> bytes:
+        """构造请求 payload（feature key 可配置）"""
         # protobuf (match captured HAR):
         # 0a 02 10 01                   -> field 1 (len=2) with inner bool=true
-        # 12 1a                         -> field 2, length 26
-        #   0a 18 <name>                -> nested message with name string
-        name = b"always_show_nsfw_content"
+        # 12 xx                         -> field 2, length N
+        #   0a xx <name>                -> nested message with name string
+        feature_key = str(
+            get_config("grok.nsfw_feature_key", "always_show_nsfw_content")
+        ).strip() or "always_show_nsfw_content"
+        name = feature_key.encode("utf-8")
         inner = b"\x0a" + bytes([len(name)]) + name
         protobuf = b"\x0a\x02\x10\x01\x12" + bytes([len(inner)]) + inner
         return encode_grpc_web_payload(protobuf)
@@ -93,10 +95,27 @@ class NSFWService:
                 )
 
                 if response.status_code != 200:
+                    # 线上批量失败时最常见是 Cloudflare/WAF 拦截，给出可读提示便于排查。
+                    snippet = ""
+                    try:
+                        snippet = response.content[:200].decode(
+                            "utf-8", errors="replace"
+                        )
+                        snippet = " ".join(snippet.split())
+                    except Exception:
+                        snippet = ""
+                    logger.warning(
+                        "NSFW HTTP error: status={} ct={} cf-ray={} snippet={}",
+                        response.status_code,
+                        response.headers.get("content-type", ""),
+                        response.headers.get("cf-ray", ""),
+                        snippet,
+                    )
                     return NSFWResult(
                         success=False,
                         http_status=response.status_code,
-                        error=f"HTTP {response.status_code}",
+                        error=f"HTTP {response.status_code}"
+                        + (f": {snippet[:120]}" if snippet else ""),
                     )
 
                 # 解析 gRPC-Web 响应

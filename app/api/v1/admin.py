@@ -403,11 +403,24 @@ async def enable_nsfw_api(data: dict):
 
         # 批量执行配置
         max_concurrent = get_config("performance.nsfw_max_concurrent", 10)
+        apply_concurrency = get_config("grok.nsfw_apply_concurrency", None)
+        if apply_concurrency is not None:
+            try:
+                max_concurrent = min(int(max_concurrent), int(apply_concurrency))
+            except Exception:
+                pass
         batch_size = get_config("performance.nsfw_batch_size", 50)
+        apply_delay_ms = get_config("grok.nsfw_apply_delay_ms", 0)
+        try:
+            apply_delay_ms = max(0, int(apply_delay_ms))
+        except Exception:
+            apply_delay_ms = 0
 
         # 定义 worker
         async def _enable(token: str):
             result = await nsfw_service.enable(token)
+            if apply_delay_ms:
+                await asyncio.sleep(apply_delay_ms / 1000)
             # 成功后添加 nsfw tag
             if result.success:
                 await mgr.add_tag(token, "nsfw")
@@ -508,7 +521,18 @@ async def enable_nsfw_api_async(data: dict):
         )
 
     max_concurrent = get_config("performance.nsfw_max_concurrent", 10)
+    apply_concurrency = get_config("grok.nsfw_apply_concurrency", None)
+    if apply_concurrency is not None:
+        try:
+            max_concurrent = min(int(max_concurrent), int(apply_concurrency))
+        except Exception:
+            pass
     batch_size = get_config("performance.nsfw_batch_size", 50)
+    apply_delay_ms = get_config("grok.nsfw_apply_delay_ms", 0)
+    try:
+        apply_delay_ms = max(0, int(apply_delay_ms))
+    except Exception:
+        apply_delay_ms = 0
 
     task = create_task(len(unique_tokens))
 
@@ -517,6 +541,8 @@ async def enable_nsfw_api_async(data: dict):
 
             async def _enable(token: str):
                 result = await nsfw_service.enable(token)
+                if apply_delay_ms:
+                    await asyncio.sleep(apply_delay_ms / 1000)
                 if result.success:
                     await mgr.add_tag(token, "nsfw")
                 return {
