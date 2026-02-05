@@ -3,23 +3,23 @@ Image Generation API 路由
 """
 
 import asyncio
-import math
 import random
+import time
 from typing import List, Optional
 
-from fastapi import APIRouter
-from fastapi.responses import StreamingResponse, JSONResponse
-from pydantic import BaseModel, Field
 import orjson
+from fastapi import APIRouter
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, Field
 
-from app.services.grok.chat import GrokChatService
-from app.services.grok.model import ModelService
-from app.services.grok.processor import ImageStreamProcessor, ImageCollectProcessor
-from app.services.grok.imagine_ws import imagine_ws_service
-from app.services.token import get_token_manager
 from app.core.config import get_config
-from app.core.exceptions import ValidationException, AppException, ErrorType
+from app.core.exceptions import AppException, ErrorType, ValidationException
 from app.core.logger import logger
+from app.services.grok.chat import GrokChatService
+from app.services.grok.imagine_ws import imagine_ws_service
+from app.services.grok.model import ModelService
+from app.services.grok.processor import ImageCollectProcessor, ImageStreamProcessor
+from app.services.token import EffortType, get_token_manager
 
 
 router = APIRouter(tags=["Images"])
@@ -27,6 +27,7 @@ router = APIRouter(tags=["Images"])
 
 class ImageGenerationRequest(BaseModel):
     """图片生成请求 - OpenAI 兼容"""
+
     prompt: str = Field(..., description="图片描述")
     model: Optional[str] = Field("grok-imagine-1.0", description="模型名称")
     n: Optional[int] = Field(1, ge=1, le=10, description="生成数量 (1-10)")
@@ -68,56 +69,6 @@ def sse_event(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {orjson.dumps(data).decode()}\n\n"
 
 
-def validate_request(request: ImageGenerationRequest):
-    """验证请求参数"""
-    # 验证模型 - 通过 is_image 检查
-    model_info = ModelService.get(request.model)
-    if not model_info or not model_info.is_image:
-        # 获取支持的图片模型列表
-        image_models = [m.model_id for m in ModelService.MODELS if m.is_image]
-        raise ValidationException(
-            message=f"The model `{request.model}` is not supported for image generation. Supported: {image_models}",
-            param="model",
-            code="model_not_supported"
-        )
-    
-    # 验证 prompt
-    if not request.prompt or not request.prompt.strip():
-        raise ValidationException(
-            message="Prompt cannot be empty",
-            param="prompt",
-            code="empty_prompt"
-        )
-    
-    # 验证 n 参数范围
-    if request.n < 1 or request.n > 10:
-        raise ValidationException(
-            message="n must be between 1 and 10",
-            param="n",
-            code="invalid_n"
-        )
-    
-    # 流式只支持 n=1 或 n=2
-    if request.stream and request.n not in [1, 2]:
-        # Imagine WS 模型允许任意 n（最终返回按实际上游生成的数量）
-        model_info = ModelService.get(request.model)
-        if not (model_info and is_imagine_ws_model(model_info.model_id)):
-            raise ValidationException(
-                message="Streaming is only supported when n=1 or n=2",
-                param="stream",
-                code="invalid_stream_n"
-            )
-
-    # response_format（仅当用户显式传入时校验）
-    if hasattr(request, "model_fields_set") and "response_format" in request.model_fields_set:
-        if request.response_format and request.response_format not in {"b64_json", "url"}:
-            raise ValidationException(
-                message="response_format must be 'b64_json' or 'url'",
-                param="response_format",
-                code="invalid_response_format"
-            )
-
-
 def resolve_response_format(request: ImageGenerationRequest) -> str:
     """
     解析输出格式：
@@ -128,31 +79,80 @@ def resolve_response_format(request: ImageGenerationRequest) -> str:
         fmt = (request.response_format or "").strip().lower()
         if fmt in {"b64_json", "url"}:
             return fmt
-
     cfg = str(get_config("app.image_format", "url") or "").strip().lower()
     if cfg in {"base64", "b64_json"}:
         return "b64_json"
     return "url"
 
 
-async def call_grok(token: str, prompt: str, model_info, output_format: str) -> List[str]:
+def validate_request(request: ImageGenerationRequest):
+    """验证请求参数"""
+    # 验证模型 - 通过 is_image 检查
+    model_info = ModelService.get(request.model)
+    if not model_info or not model_info.is_image:
+        image_models = [m.model_id for m in ModelService.MODELS if m.is_image]
+        raise ValidationException(
+            message=f"The model `{request.model}` is not supported for image generation. Supported: {image_models}",
+            param="model",
+            code="model_not_supported",
+        )
+
+    if not request.prompt or not request.prompt.strip():
+        raise ValidationException(message="Prompt cannot be empty", param="prompt", code="empty_prompt")
+
+    if request.n < 1 or request.n > 10:
+        raise ValidationException(message="n must be between 1 and 10", param="n", code="invalid_n")
+
+    # 流式只支持 n=1 或 n=2（Imagine WS 模型除外）
+    if request.stream and request.n not in [1, 2]:
+        if not is_imagine_ws_model(request.model):
+            raise ValidationException(
+                message="Streaming is only supported when n=1 or n=2",
+                param="stream",
+                code="invalid_stream_n",
+            )
+
+    # response_format（仅当用户显式传入时校验）
+    if hasattr(request, "model_fields_set") and "response_format" in request.model_fields_set:
+        if request.response_format and request.response_format not in {"b64_json", "url"}:
+            raise ValidationException(
+                message="response_format must be 'b64_json' or 'url'",
+                param="response_format",
+                code="invalid_response_format",
+            )
+
+
+async def call_grok(token_mgr, token: str, prompt: str, model_info) -> List[str]:
     """
-    调用 Grok 获取图片，返回 base64 或 url 列表
+    调用 Grok 获取图片（非 Imagine WS），返回 base64 列表
     """
     chat_service = GrokChatService()
-    
-    response = await chat_service.chat(
-        token=token,
-        message=f"Image Generation:{prompt}",
-        model=model_info.grok_model,
-        mode=model_info.model_mode,
-        think=False,
-        stream=True
-    )
-    
-    # 收集图片
-    processor = ImageCollectProcessor(model_info.model_id, token, output_format=output_format)
-    return await processor.process(response)
+    success = False
+
+    try:
+        response = await chat_service.chat(
+            token=token,
+            message=f"Image Generation:{prompt}",
+            model=model_info.grok_model,
+            mode=model_info.model_mode,
+            think=False,
+            stream=True,
+        )
+        processor = ImageCollectProcessor(model_info.model_id, token)
+        images = await processor.process(response)
+        success = True
+        return images
+    except Exception as e:
+        logger.error(f"Grok image call failed: {e}")
+        return []
+    finally:
+        # 只在成功时记录使用，失败时不扣费（避免清零 fail_count）
+        if success:
+            try:
+                effort = EffortType.HIGH if (model_info and model_info.cost.value == "high") else EffortType.LOW
+                await token_mgr.consume(token, effort)
+            except Exception as e:
+                logger.warning(f"Failed to consume token: {e}")
 
 
 async def call_imagine_ws(token: str, prompt: str, aspect_ratio: str, n: int, output_format: str) -> List[str]:
@@ -182,35 +182,34 @@ async def call_imagine_ws(token: str, prompt: str, aspect_ratio: str, n: int, ou
 async def create_image(request: ImageGenerationRequest):
     """
     Image Generation API
-    
+
     流式响应格式:
     - event: image_generation.partial_image
     - event: image_generation.completed
-    
+
     非流式响应格式:
     - {"created": ..., "data": [{"b64_json": "..."}], "usage": {...}}
     """
-    # stream 默认为 false
     if request.stream is None:
         request.stream = False
-    
-    # 参数验证
+
     validate_request(request)
 
-    output_format = resolve_response_format(request)
-    
     # 获取 token
     try:
         token_mgr = await get_token_manager()
         await token_mgr.reload_if_stale()
-        pool_name = ModelService.pool_for_model(request.model)
-        token = token_mgr.get_token(pool_name)
+        token = None
+        for pool_name in ModelService.pool_candidates_for_model(request.model):
+            token = token_mgr.get_token(pool_name)
+            if token:
+                break
     except Exception as e:
         logger.error(f"Failed to get token: {e}")
         raise AppException(
             message="Internal service error obtaining token",
             error_type=ErrorType.SERVER.value,
-            code="internal_error"
+            code="internal_error",
         )
 
     if not token:
@@ -218,21 +217,23 @@ async def create_image(request: ImageGenerationRequest):
             message="No available tokens. Please try again later.",
             error_type=ErrorType.RATE_LIMIT.value,
             code="rate_limit_exceeded",
-            status_code=429
+            status_code=429,
         )
-    
-    # 获取模型信息
+
     model_info = ModelService.get(request.model)
 
     # ===================== Imagine 2.0 (WebSocket) =====================
     if model_info and is_imagine_ws_model(model_info.model_id):
+        output_format = resolve_response_format(request)
+
         # 仅当用户显式传入 size 时才做映射，否则使用配置默认比例（避免被 Pydantic 默认值误导）
         if hasattr(request, "model_fields_set") and "size" in request.model_fields_set:
             aspect_ratio = size_to_aspect_ratio(request.size)
         else:
             aspect_ratio = str(get_config("grok.imagine_default_aspect_ratio", "2:3") or "").strip() or "2:3"
 
-        # 流式模式（复用本项目 SSE 事件定义）
+        effort = EffortType.HIGH if (model_info and model_info.cost.value == "high") else EffortType.LOW
+
         if request.stream:
             stage_progress = {"preview": 33, "medium": 66, "final": 99}
 
@@ -246,7 +247,6 @@ async def create_image(request: ImageGenerationRequest):
                     n=request.n,
                 ):
                     if item.get("type") == "heartbeat":
-                        # SSE 心跳（注释行），防止长时间无数据导致客户端断开/卡住
                         elapsed = item.get("elapsed")
                         if elapsed is None:
                             yield ": ping\n\n"
@@ -301,7 +301,6 @@ async def create_image(request: ImageGenerationRequest):
                             )
                             return
 
-                        # 最终返回多少就给多少（不再按 request.n 截断）
                         for index, val in enumerate(valid):
                             payload = {
                                 "type": "image_generation.completed",
@@ -316,6 +315,12 @@ async def create_image(request: ImageGenerationRequest):
                                 },
                             }
                             yield sse_event("image_generation.completed", payload)
+
+                        # 成功完成后扣费
+                        try:
+                            await token_mgr.consume(token, effort)
+                        except Exception as e:
+                            logger.warning(f"Failed to consume token: {e}")
                         return
 
             return StreamingResponse(
@@ -325,53 +330,41 @@ async def create_image(request: ImageGenerationRequest):
             )
 
         # 非流式模式：单次 WS，最终返回“实际上游生成的全部图片”
-        n = request.n
-        errors: List[str] = []
+        images = await call_imagine_ws(token, request.prompt, aspect_ratio, request.n, output_format)
 
-        try:
-            all_images = await call_imagine_ws(token, request.prompt, aspect_ratio, n, output_format)
-        except Exception as e:
-            logger.error(f"Imagine WS call failed: {e}")
-            errors.append(str(e)[:200])
-            all_images = []
-
-        valid_images = [
-            img for img in all_images
-            if isinstance(img, str) and img.strip() and img.strip().lower() != "error"
-        ]
-
+        valid_images = [img for img in images if isinstance(img, str) and img.strip()]
         if not valid_images:
-            reason = errors[0] if errors else "no valid images returned"
             raise AppException(
-                message=f"Image generation failed: {reason}",
+                message="Image generation failed: no valid images returned",
                 error_type=ErrorType.SERVER.value,
                 code="image_generation_failed",
                 status_code=502,
             )
 
-        # 最终返回多少就给多少（不再按 request.n 截断/抽样）
-        selected_images = list(valid_images)
-
-        import time
         if output_format == "url":
-            data = [{"url": img} for img in selected_images]
+            data = [{"url": img} for img in valid_images]
         else:
-            data = [{"b64_json": img} for img in selected_images]
+            data = [{"b64_json": img} for img in valid_images]
+
+        try:
+            await token_mgr.consume(token, effort)
+        except Exception as e:
+            logger.warning(f"Failed to consume token: {e}")
 
         return JSONResponse(
             content={
                 "created": int(time.time()),
                 "data": data,
                 "usage": {
-                    "total_tokens": 0 * len(selected_images),
+                    "total_tokens": 0,
                     "input_tokens": 0,
-                    "output_tokens": 0 * len(selected_images),
+                    "output_tokens": 0,
                     "input_tokens_details": {"text_tokens": 0, "image_tokens": 0},
                 },
             }
         )
-    
-    # 流式模式
+
+    # ===================== Default image models (REST chat) =====================
     if request.stream:
         chat_service = GrokChatService()
         response = await chat_service.chat(
@@ -380,82 +373,76 @@ async def create_image(request: ImageGenerationRequest):
             model=model_info.grok_model,
             mode=model_info.model_mode,
             think=False,
-            stream=True
+            stream=True,
         )
-        
-        processor = ImageStreamProcessor(model_info.model_id, token, n=request.n, output_format=output_format)
+
+        processor = ImageStreamProcessor(model_info.model_id, token, n=request.n)
+
+        async def _wrap_stream(stream):
+            success = False
+            try:
+                async for chunk in stream:
+                    yield chunk
+                success = True
+            finally:
+                if success:
+                    try:
+                        effort = EffortType.HIGH if (model_info and model_info.cost.value == "high") else EffortType.LOW
+                        await token_mgr.consume(token, effort)
+                    except Exception as e:
+                        logger.warning(f"Failed to consume token: {e}")
+
         return StreamingResponse(
-            processor.process(response),
+            _wrap_stream(processor.process(response)),
             media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"}
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
         )
-    
-    # 非流式模式
+
     n = request.n
-    
-    calls_needed = (n + 1) // 2 
-    errors: List[str] = []
-    
+    calls_needed = (n + 1) // 2
+
     if calls_needed == 1:
-        # 单次调用
-        try:
-            all_images = await call_grok(token, request.prompt, model_info, output_format)
-        except Exception as e:
-            logger.error(f"Grok image call failed: {e}")
-            errors.append(str(e)[:200])
-            all_images = []
+        all_images = await call_grok(token_mgr, token, request.prompt, model_info)
     else:
-        # 并发调用
-        tasks = [
-            call_grok(token, request.prompt, model_info, output_format)
-            for _ in range(calls_needed)
-        ]
+        tasks = [call_grok(token_mgr, token, request.prompt, model_info) for _ in range(calls_needed)]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # 收集成功的图片
+
         all_images = []
         for result in results:
             if isinstance(result, Exception):
                 logger.error(f"Concurrent call failed: {result}")
-                errors.append(str(result)[:200])
             elif isinstance(result, list):
                 all_images.extend(result)
-    
-    # 过滤空图片 / 非法占位（避免出现 /v1/files/image/ 的裂图请求）
-    valid_images = [
-        img for img in all_images
-        if isinstance(img, str) and img.strip() and img.strip().lower() != "error"
-    ]
+
+    # 尽量返回有效图片（不足不填充 error，避免客户端裂图）
+    valid_images = [img for img in all_images if isinstance(img, str) and img.strip() and img.strip().lower() != "error"]
 
     if not valid_images:
-        reason = errors[0] if errors else "no valid images returned"
         raise AppException(
-            message=f"Image generation failed: {reason}",
+            message="Image generation failed: no valid images returned",
             error_type=ErrorType.SERVER.value,
             code="image_generation_failed",
             status_code=502,
         )
 
-    # 随机选取最多 n 张图片（不再填充 error，避免客户端裂图）
-    selected_images = random.sample(valid_images, min(n, len(valid_images)))
-    
-    # 构建响应
-    import time
-    if output_format == "url":
-        data = [{"url": img} for img in selected_images]
-    else:
-        data = [{"b64_json": img} for img in selected_images]
-    
-    return JSONResponse(content={
-        "created": int(time.time()),
-        "data": data,
-        "usage": {
-            "total_tokens": 0 * len(selected_images),
-            "input_tokens": 0,
-            "output_tokens": 0 * len(selected_images),
-            "input_tokens_details": {"text_tokens": 0, "image_tokens": 0}
+    # 兼容旧行为：如果返回数量 >= n，则随机抽样 n 张；否则全量返回
+    selected_images = random.sample(valid_images, n) if len(valid_images) >= n else valid_images
+
+    data = [{"b64_json": img} for img in selected_images]
+
+    return JSONResponse(
+        content={
+            "created": int(time.time()),
+            "data": data,
+            "usage": {
+                "total_tokens": 0 * len(selected_images),
+                "input_tokens": 0,
+                "output_tokens": 0 * len(selected_images),
+                "input_tokens_details": {"text_tokens": 0, "image_tokens": 0},
+            },
         }
-    })
+    )
 
 
 __all__ = ["router"]
+

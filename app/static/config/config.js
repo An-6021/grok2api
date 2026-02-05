@@ -1,5 +1,6 @@
 let apiKey = '';
 let currentConfig = {};
+const byId = (id) => document.getElementById(id);
 const NUMERIC_FIELDS = new Set([
   'timeout',
   'imagine_timeout',
@@ -10,7 +11,12 @@ const NUMERIC_FIELDS = new Set([
   'imagine_stream_timeout_buffer_sec',
   'imagine_chat_default_n',
   'max_retry',
+  'retry_backoff_base',
+  'retry_backoff_factor',
+  'retry_backoff_max',
+  'retry_budget',
   'refresh_interval_hours',
+  'super_refresh_interval_hours',
   'fail_threshold',
   'limit_mb',
   'save_delay_ms',
@@ -18,8 +24,16 @@ const NUMERIC_FIELDS = new Set([
   'media_max_concurrent',
   'usage_max_concurrent',
   'assets_delete_batch_size',
-  'admin_assets_batch_size',
+  'assets_batch_size',
+  'assets_max_tokens',
+  'usage_batch_size',
+  'usage_max_tokens',
   'reload_interval_sec',
+  'stream_idle_timeout',
+  'video_idle_timeout',
+  'nsfw_max_concurrent',
+  'nsfw_batch_size',
+  'nsfw_max_tokens',
   'nsfw_apply_concurrency',
   'nsfw_apply_delay_ms',
   'imagine_max_concurrent'
@@ -28,11 +42,11 @@ const NUMERIC_FIELDS = new Set([
 const LOCALE_MAP = {
   "app": {
     "label": "应用设置",
-    "api_key": { title: "API 密钥", desc: "调用 Grok2API 服务所需的 Bearer Token，请妥善保管。" },
-    "app_key": { title: "后台密码", desc: "登录 Grok2API 服务管理后台的密码，请妥善保管。" },
+    "api_key": { title: "API 密钥", desc: "调用 Grok2API 服务的 Token（可选）。" },
+    "app_key": { title: "后台密码", desc: "登录 Grok2API 管理后台的密码（必填）。" },
     "app_url": { title: "应用地址", desc: "当前 Grok2API 服务的外部访问 URL，用于文件链接访问。" },
     "image_format": { title: "图片格式", desc: "生成的图片格式（url 或 base64）。" },
-    "video_format": { title: "视频格式", desc: "生成的视频格式（仅支持 url）。" }
+    "video_format": { title: "视频格式", desc: "生成的视频格式（html 或 url，url 为处理后的链接）。" }
   },
   "grok": {
     "label": "Grok 设置",
@@ -61,12 +75,19 @@ const LOCALE_MAP = {
     "retry_status_codes": { title: "重试状态码", desc: "触发重试的 HTTP 状态码列表。" },
     "nsfw_feature_key": { title: "NSFW 功能 Key", desc: "UpdateUserFeatureControls 的 feature key（默认 always_show_nsfw_content）。" },
     "nsfw_apply_concurrency": { title: "NSFW 批量并发", desc: "管理页批量开启 NSFW 的并发数量。" },
-    "nsfw_apply_delay_ms": { title: "NSFW 批量延迟", desc: "批量开启时每个请求后的延迟（毫秒），用于降低风控/限流风险。" }
+    "nsfw_apply_delay_ms": { title: "NSFW 批量延迟", desc: "批量开启时每个请求后的延迟（毫秒），用于降低风控/限流风险。" },
+    "retry_backoff_base": { title: "退避基数", desc: "重试退避的基础延迟（秒）。" },
+    "retry_backoff_factor": { title: "退避倍率", desc: "重试退避的指数放大系数。" },
+    "retry_backoff_max": { title: "退避上限", desc: "单次重试等待的最大延迟（秒）。" },
+    "retry_budget": { title: "退避预算", desc: "单次请求的最大重试总耗时（秒）。" },
+    "stream_idle_timeout": { title: "流空闲超时", desc: "流式响应空闲超时（秒），超过将断开。" },
+    "video_idle_timeout": { title: "视频空闲超时", desc: "视频生成空闲超时（秒），超过将断开。" }
   },
   "token": {
     "label": "Token 池设置",
     "auto_refresh": { title: "自动刷新", desc: "是否开启 Token 自动刷新机制。" },
     "refresh_interval_hours": { title: "刷新间隔", desc: "Token 刷新的时间间隔（小时）。" },
+    "super_refresh_interval_hours": { title: "Super 刷新间隔", desc: "Super Token 刷新的时间间隔（小时）。" },
     "fail_threshold": { title: "失败阈值", desc: "单个 Token 连续失败多少次后被标记为不可用。" },
     "save_delay_ms": { title: "保存延迟", desc: "Token 变更合并写入的延迟（毫秒）。" },
     "reload_interval_sec": { title: "一致性刷新", desc: "多 worker 场景下 Token 状态刷新间隔（秒）。" }
@@ -78,14 +99,22 @@ const LOCALE_MAP = {
   },
   "performance": {
     "label": "并发性能",
-    "assets_max_concurrent": { title: "资产并发上限", desc: "资源上传/下载/列表的并发上限。推荐 25。" },
-    "media_max_concurrent": { title: "媒体并发上限", desc: "视频/媒体生成请求的并发上限。推荐 50。" },
-    "usage_max_concurrent": { title: "用量并发上限", desc: "用量查询请求的并发上限。推荐 25。" },
-    "imagine_max_concurrent": { title: "Imagine 并发上限", desc: "Imagine WebSocket 图片生成的并发上限。推荐 20。" },
-    "assets_delete_batch_size": { title: "资产清理批量", desc: "在线资产删除单批并发数量。推荐 10。" },
-    "admin_assets_batch_size": { title: "管理端批量", desc: "管理端在线资产统计/清理批量并发数量。推荐 10。" }
+    "media_max_concurrent": { title: "Media 并发上限", desc: "视频/媒体生成请求的并发上限。推荐 50。" },
+    "nsfw_max_concurrent": { title: "NSFW 开启并发上限", desc: "批量开启 NSFW 模式时的并发请求上限。推荐 10。" },
+    "nsfw_batch_size": { title: "NSFW 开启批量大小", desc: "批量开启 NSFW 模式的单批处理数量。推荐 50。" },
+    "nsfw_max_tokens": { title: "NSFW 开启最大数量", desc: "单次批量开启 NSFW 的 Token 数量上限，防止误操作。推荐 1000。" },
+    "usage_max_concurrent": { title: "Token 刷新并发上限", desc: "批量刷新 Token 用量时的并发请求上限。推荐 25。" },
+    "usage_batch_size": { title: "Token 刷新批次大小", desc: "批量刷新 Token 用量的单批处理数量。推荐 50。" },
+    "usage_max_tokens": { title: "Token 刷新最大数量", desc: "单次批量刷新 Token 用量时的处理数量上限。推荐 1000。" },
+    "assets_max_concurrent": { title: "Assets 处理并发上限", desc: "批量查找/删除资产时的并发请求上限。推荐 25。" },
+    "assets_batch_size": { title: "Assets 处理批次大小", desc: "批量查找/删除资产时的单批处理数量。推荐 10。" },
+    "assets_max_tokens": { title: "Assets 处理最大数量", desc: "单次批量查找/删除资产时的处理数量上限。推荐 1000。" },
+    "assets_delete_batch_size": { title: "Assets 单账号删除批量大小", desc: "单账号批量删除资产时的单批并发数量。推荐 10。" },
+    "imagine_max_concurrent": { title: "Imagine 并发上限", desc: "Imagine WebSocket 图片生成的并发上限。推荐 20。" }
   }
 };
+
+const SECTION_ORDER = new Map(Object.keys(LOCALE_MAP).map((key, index) => [key, index]));
 
 function getText(section, key) {
   if (LOCALE_MAP[section] && LOCALE_MAP[section][key]) {
@@ -99,6 +128,101 @@ function getText(section, key) {
 
 function getSectionLabel(section) {
   return (LOCALE_MAP[section] && LOCALE_MAP[section].label) || `${section} 设置`;
+}
+
+function sortByOrder(keys, orderMap) {
+  if (!orderMap) return keys;
+  return keys.sort((a, b) => {
+    const ia = orderMap.get(a);
+    const ib = orderMap.get(b);
+    if (ia !== undefined && ib !== undefined) return ia - ib;
+    if (ia !== undefined) return -1;
+    if (ib !== undefined) return 1;
+    return 0;
+  });
+}
+
+function setInputMeta(input, section, key) {
+  input.dataset.section = section;
+  input.dataset.key = key;
+}
+
+function createOption(value, text, selectedValue) {
+  const option = document.createElement('option');
+  option.value = value;
+  option.text = text;
+  if (selectedValue !== undefined && selectedValue === value) option.selected = true;
+  return option;
+}
+
+function buildBooleanInput(section, key, val) {
+  const label = document.createElement('label');
+  label.className = 'relative inline-flex items-center cursor-pointer';
+
+  const input = document.createElement('input');
+  input.type = 'checkbox';
+  input.checked = val;
+  input.className = 'sr-only peer';
+  setInputMeta(input, section, key);
+
+  const slider = document.createElement('div');
+  slider.className = "w-9 h-5 bg-[var(--accents-2)] peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-black";
+
+  label.appendChild(input);
+  label.appendChild(slider);
+
+  return { input, node: label };
+}
+
+function buildSelectInput(section, key, val, options) {
+  const input = document.createElement('select');
+  input.className = 'geist-input h-[34px]';
+  setInputMeta(input, section, key);
+  options.forEach(opt => {
+    input.appendChild(createOption(opt.val, opt.text, val));
+  });
+  return { input, node: input };
+}
+
+function buildJsonInput(section, key, val) {
+  const input = document.createElement('textarea');
+  input.className = 'geist-input font-mono text-xs';
+  input.rows = 4;
+  input.value = JSON.stringify(val, null, 2);
+  setInputMeta(input, section, key);
+  input.dataset.type = 'json';
+  return { input, node: input };
+}
+
+function buildTextInput(section, key, val) {
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'geist-input';
+  input.value = val;
+  setInputMeta(input, section, key);
+  return { input, node: input };
+}
+
+function buildSecretInput(section, key, val) {
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'geist-input flex-1 h-[34px]';
+  input.value = val;
+  setInputMeta(input, section, key);
+
+  const wrapper = document.createElement('div');
+  wrapper.className = 'flex items-center gap-2';
+
+  const copyBtn = document.createElement('button');
+  copyBtn.className = 'flex-none w-[32px] h-[32px] flex items-center justify-center bg-black text-white rounded-md hover:opacity-80 transition-opacity';
+  copyBtn.type = 'button';
+  copyBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`;
+  copyBtn.onclick = () => copyToClipboard(input.value, copyBtn);
+
+  wrapper.appendChild(input);
+  wrapper.appendChild(copyBtn);
+
+  return { input, node: wrapper };
 }
 
 async function init() {
@@ -124,23 +248,17 @@ async function loadData() {
 }
 
 function renderConfig(data) {
-  const container = document.getElementById('config-container');
-  container.innerHTML = '';
+  const container = byId('config-container');
+  if (!container) return;
+  container.replaceChildren();
 
-  const sections = Object.keys(data);
-  const sectionOrder = Object.keys(LOCALE_MAP);
-
-  sections.sort((a, b) => {
-    const ia = sectionOrder.indexOf(a);
-    const ib = sectionOrder.indexOf(b);
-    if (ia !== -1 && ib !== -1) return ia - ib;
-    if (ia !== -1) return -1; // Known sections first
-    if (ib !== -1) return 1;
-    return 0;
-  });
+  const fragment = document.createDocumentFragment();
+  const sections = sortByOrder(Object.keys(data), SECTION_ORDER);
 
   sections.forEach(section => {
     const items = data[section];
+    const localeSection = LOCALE_MAP[section];
+    const keyOrder = localeSection ? new Map(Object.keys(localeSection).map((k, i) => [k, i])) : null;
 
     const card = document.createElement('div');
     card.className = 'config-section';
@@ -152,18 +270,7 @@ function renderConfig(data) {
     const grid = document.createElement('div');
     grid.className = 'config-grid';
 
-    const keys = Object.keys(items);
-    if (LOCALE_MAP[section]) {
-      const order = Object.keys(LOCALE_MAP[section]);
-      keys.sort((a, b) => {
-        const ia = order.indexOf(a);
-        const ib = order.indexOf(b);
-        if (ia !== -1 && ib !== -1) return ia - ib;
-        if (ia !== -1) return -1;
-        if (ib !== -1) return 1;
-        return 0;
-      });
-    }
+    const keys = sortByOrder(Object.keys(items), keyOrder);
 
     keys.forEach(key => {
       const val = items[key];
@@ -190,100 +297,36 @@ function renderConfig(data) {
       inputWrapper.className = 'config-field-input';
 
       // Input Logic
-      let input;
+      let built;
       if (typeof val === 'boolean') {
-        const label = document.createElement('label');
-        label.className = 'relative inline-flex items-center cursor-pointer';
-
-        input = document.createElement('input');
-        input.type = 'checkbox';
-        input.checked = val;
-        input.className = 'sr-only peer';
-        input.dataset.section = section;
-        input.dataset.key = key;
-
-        const slider = document.createElement('div');
-        slider.className = "w-9 h-5 bg-[var(--accents-2)] peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-black";
-
-        label.appendChild(input);
-        label.appendChild(slider);
-        inputWrapper.appendChild(label);
+        built = buildBooleanInput(section, key, val);
       }
       else if (key === 'image_format') {
-        input = document.createElement('select');
-        input.className = 'geist-input h-[34px]'; // Matches reduced padding inputs
-        input.dataset.section = section;
-        input.dataset.key = key;
-
-        const opts = [
+        built = buildSelectInput(section, key, val, [
           { val: 'url', text: 'URL' },
           { val: 'base64', text: 'Base64' }
-        ];
-
-        opts.forEach(opt => {
-          const option = document.createElement('option');
-          option.value = opt.val;
-          option.text = opt.text;
-          if (val === opt.val) option.selected = true;
-          input.appendChild(option);
-        });
-        inputWrapper.appendChild(input);
+        ]);
       }
       else if (key === 'video_format') {
-        input = document.createElement('select');
-        input.className = 'geist-input h-[34px]';
-        input.dataset.section = section;
-        input.dataset.key = key;
-
-        const option = document.createElement('option');
-        option.value = 'url';
-        option.text = 'URL';
-        option.selected = true;
-        input.appendChild(option);
-
-        inputWrapper.appendChild(input);
+        built = buildSelectInput(section, key, val, [
+          { val: 'html', text: 'HTML' },
+          { val: 'url', text: 'URL' }
+        ]);
       }
       else if (Array.isArray(val) || typeof val === 'object') {
-        input = document.createElement('textarea');
-        input.className = 'geist-input font-mono text-xs';
-        input.rows = 4;
-        input.value = JSON.stringify(val, null, 2);
-        input.dataset.section = section;
-        input.dataset.key = key;
-        input.dataset.type = 'json';
-        inputWrapper.appendChild(input);
+        built = buildJsonInput(section, key, val);
       }
       else {
-        input = document.createElement('input');
-        input.type = 'text';
-        input.className = 'geist-input';
-        input.value = val;
-        input.dataset.section = section;
-        input.dataset.key = key;
-
-        if (key === 'app_key') input.type = 'text';
-
         if (key === 'api_key' || key === 'app_key') {
-          const wrapper = document.createElement('div');
-          wrapper.className = 'flex items-center gap-2';
-
-          input.className = 'geist-input flex-1 h-[34px]';
-
-          const copyBtn = document.createElement('button');
-          copyBtn.className = 'flex-none w-[32px] h-[32px] flex items-center justify-center bg-black text-white rounded-md hover:opacity-80 transition-opacity';
-          copyBtn.type = 'button';
-          copyBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`;
-
-          copyBtn.onclick = () => copyToClipboard(input.value, copyBtn);
-
-          wrapper.appendChild(input);
-          wrapper.appendChild(copyBtn);
-          inputWrapper.appendChild(wrapper);
+          built = buildSecretInput(section, key, val);
         } else {
-          inputWrapper.appendChild(input);
+          built = buildTextInput(section, key, val);
         }
       }
 
+      if (built) {
+        inputWrapper.appendChild(built.node);
+      }
       fieldCard.appendChild(inputWrapper);
       grid.appendChild(fieldCard);
     });
@@ -291,20 +334,23 @@ function renderConfig(data) {
     card.appendChild(grid);
 
     if (grid.children.length > 0) {
-      container.appendChild(card);
+      fragment.appendChild(card);
     }
   });
 
+  container.appendChild(fragment);
 }
 
 async function saveConfig() {
-  const btn = document.getElementById('save-btn');
+  const btn = byId('save-btn');
   const originalText = btn.innerText;
   btn.disabled = true;
   btn.innerText = '保存中...';
 
   try {
-    const newConfig = JSON.parse(JSON.stringify(currentConfig));
+    const newConfig = typeof structuredClone === 'function'
+      ? structuredClone(currentConfig)
+      : JSON.parse(JSON.stringify(currentConfig));
     const inputs = document.querySelectorAll('input[data-section], textarea[data-section], select[data-section]');
 
     inputs.forEach(input => {
@@ -317,7 +363,7 @@ async function saveConfig() {
       } else if (input.dataset.type === 'json') {
         try { val = JSON.parse(val); } catch (e) { throw new Error(`无效的 JSON: ${getText(s, k).title}`); }
       } else if (k === 'app_key' && val.trim() === '') {
-        throw new Error('后台密码不能为空');
+        throw new Error('app_key 不能为空（后台密码）');
       } else if (NUMERIC_FIELDS.has(k)) {
         if (val.trim() !== '' && !Number.isNaN(Number(val))) {
           val = Number(val);

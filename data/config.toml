@@ -7,23 +7,27 @@ filter_tags = ["xaiartifact","xai:tool_usage_card","grok:render"]
 timeout = 120
 base_proxy_url = ""
 asset_proxy_url = ""
-cf_clearance = "cKT2BsgEjI32f2G5le46kBsWwnlL5yJULNt6pMsmBu0-1770192411-1.2.1.1-bQKVYJpgqDnuZImfaxRnnU1ut6qIFI3JZJFsFdLDkgjq6EvJJExgqfir70bQjYUpI.OmDu6ekPAx7Tn1dRFjDXgET.HZ6fjK.wa6YIgZzSOKkfB9qQdeAG_5aHulZKnvluKFNYfIts9a9G4GU06TlMRnljT7Wx6OZ0Oc.QUT0xGYTQOBeAplH9PIa56Ov_1J9R8Ef4WPVrirNFZtRtvvcYENjrNpsPmc4Mqw_1w7YC0"
+cf_clearance = ""
 max_retry = 3
 retry_status_codes = [401,429,403]
-nsfw_feature_key = "always_show_nsfw_content"
-nsfw_apply_concurrency = 5
-nsfw_apply_delay_ms = 500
+retry_backoff_base = 0.5
+retry_backoff_factor = 2.0
+retry_backoff_max = 30.0
+retry_budget = 90.0
+stream_idle_timeout = 45.0
+video_idle_timeout = 90.0
 
 [app]
 app_url = "http://127.0.0.1:8000"
-app_key = "admin"
-api_key = "123"
+app_key = "grok2api"
+api_key = ""
 image_format = "url"
-video_format = "url"
+video_format = "html"
 
 [token]
 auto_refresh = true
 refresh_interval_hours = 8
+super_refresh_interval_hours = 2
 fail_threshold = 5
 save_delay_ms = 500
 reload_interval_sec = 30
@@ -37,4 +41,10 @@ assets_max_concurrent = 25
 media_max_concurrent = 50
 usage_max_concurrent = 25
 assets_delete_batch_size = 10
-admin_assets_batch_size = 10
+assets_batch_size = 10
+assets_max_tokens = 1000
+usage_batch_size = 50
+usage_max_tokens = 1000
+nsfw_max_concurrent = 10
+nsfw_batch_size = 50
+nsfw_max_tokens = 1000

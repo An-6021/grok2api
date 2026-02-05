@@ -33,8 +33,16 @@ docker compose up -d
 
 ### 管理面板
 
-访问地址：`http://<host>:8000/admin`  
+访问地址：`http://<host>:8000/admin`
 默认登录密码：`grok2api`（对应配置项 `app.app_key`，建议修改）。
+
+**功能说明**：
+- **Token 管理**：导入/添加/删除 Token，查看状态和配额
+- **状态筛选**：按状态（正常/限流/失效）或 NSFW 状态筛选
+- **批量操作**：批量刷新、导出、删除、开启 NSFW
+- **NSFW 开启**：一键为 Token 开启 Unhinged 模式（需代理或 cf_clearance）
+- **配置管理**：在线修改系统配置
+- **缓存管理**：查看和清理媒体缓存
 
 ### 环境变量
 
@@ -49,10 +57,14 @@ docker compose up -d
 | `SERVER_STORAGE_TYPE` | 存储类型（`local`/`redis`/`mysql`/`pgsql`） | `local`   | `pgsql`                                           |
 | `SERVER_STORAGE_URL`  | 存储连接串（local 时可为空）                        | `""`      | `postgresql+asyncpg://user:password@host:5432/db` |
 
+> MySQL 示例：`mysql+aiomysql://user:password@host:3306/db`（若填 `mysql://` 会自动转为 `mysql+aiomysql://`）
+
+> MySQL 示例：`mysql+aiomysql://user:password@host:3306/db`（若填 `mysql://` 会自动转为 `mysql+aiomysql://`）
+
 ### 可用次数
 
 - Basic 账号：80 次 / 20h
-- Super 账号：无账号，作者未测试
+- Super 账号：140 次 / 2h
 
 ### 可用模型
 
@@ -94,15 +106,30 @@ curl http://localhost:8000/v1/chat/completions \
 
 | 字段                 | 类型    | 说明                           | 可用参数                                           |
 | :------------------- | :------ | :----------------------------- | :------------------------------------------------- |
-| `model`            | string  | 模型名称                       | -                                                  |
-| `messages`         | array   | 消息列表                       | `developer`, `system`, `user`, `assistant` |
-| `stream`           | boolean | 是否开启流式输出               | `true`, `false`                                |
-| `thinking`         | string  | 思维链模式                     | `enabled`, `disabled`, `null`                |
-| `video_config`     | object  | **视频模型专用配置对象** | -                                                  |
-| └─`aspect_ratio` | string  | 视频宽高比                     | `16:9`, `9:16`, `1:1`, `2:3`, `3:2`      |
-| └─`video_length` | integer | 视频时长 (秒)                  | `5` - `15`                                     |
-| └─`resolution`   | string  | 分辨率                         | `SD`, `HD`                                     |
-| └─`preset`       | string  | 风格预设                       | `fun`, `normal`, `spicy`                     |
+| `model`              | string  | 模型名称                       | 见上方模型列表                                     |
+| `messages`           | array   | 消息列表                       | 见下方消息格式                                     |
+| `stream`             | boolean | 是否开启流式输出               | `true`, `false`                                    |
+| `thinking`           | string  | 思维链模式                     | `enabled`, `disabled`, `null`                      |
+| `video_config`       | object  | **视频模型专用配置对象**       | -                                                  |
+| └─`aspect_ratio`     | string  | 视频宽高比                     | `16:9`, `9:16`, `1:1`, `2:3`, `3:2`                |
+| └─`video_length`     | integer | 视频时长 (秒)                  | `6`, `10`                                          |
+| └─`resolution_name`  | string  | 分辨率                         | `480p`, `720p`                                     |
+| └─`preset`           | string  | 风格预设                       | `fun`, `normal`, `spicy`, `custom`                 |
+
+**消息格式 (messages)**：
+
+| 字段      | 类型          | 说明                                                         |
+| :-------- | :------------ | :----------------------------------------------------------- |
+| `role`    | string        | 角色：`developer`, `system`, `user`, `assistant`             |
+| `content` | string/array  | 消息内容，支持纯文本或多模态数组                             |
+
+**多模态内容块类型 (content array)**：
+
+| type        | 说明       | 示例                                                                 |
+| :---------- | :--------- | :------------------------------------------------------------------- |
+| `text`      | 文本内容   | `{"type": "text", "text": "描述这张图片"}`                           |
+| `image_url` | 图片 URL   | `{"type": "image_url", "image_url": {"url": "https://..."}}`         |
+| `file`      | 文件       | `{"type": "file", "file": {"url": "https://..."}}`                   |
 
 注：除上述外的其他参数将自动丢弃并忽略
 
@@ -130,14 +157,18 @@ curl http://localhost:8000/v1/images/generations \
 
 <br>
 
-| 字段       | 类型    | 说明             | 可用参数                                     |
-| :--------- | :------ | :--------------- | :------------------------------------------- |
-| `model`  | string  | 图像模型名       | `grok-imagine-1.0`                         |
-| `prompt` | string  | 图像描述提示词   | -                                            |
-| `n`      | integer | 生成数量         | `1` - `10` (流式模式仅限 `1` 或 `2`) |
-| `stream` | boolean | 是否开启流式输出 | `true`, `false`                          |
+| 字段              | 类型    | 说明             | 可用参数                                     |
+| :---------------- | :------ | :--------------- | :------------------------------------------- |
+| `model`           | string  | 图像模型名       | `grok-imagine-1.0`                           |
+| `prompt`          | string  | 图像描述提示词   | -                                            |
+| `n`               | integer | 生成数量         | `1` - `10` (流式模式仅限 `1` 或 `2`)         |
+| `stream`          | boolean | 是否开启流式输出 | `true`, `false`                              |
+| `size`            | string  | 图片尺寸         | `1024x1024` (暂不支持自定义)                 |
+| `quality`         | string  | 图片质量         | `standard` (暂不支持自定义)                  |
+| `response_format` | string  | 响应格式         | `url`, `b64_json`                            |
+| `style`           | string  | 风格             | - (暂不支持)                                 |
 
-注：除上述外的其他参数将自动丢弃并忽略
+注：`size`、`quality`、`style` 参数为 OpenAI 兼容保留，当前版本暂不支持自定义
 
 <br>
 
@@ -156,10 +187,10 @@ curl http://localhost:8000/v1/images/generations \
 | 模块                  | 字段                         | 配置名       | 说明                                                 | 默认值                                                    |
 | :-------------------- | :--------------------------- | :----------- | :--------------------------------------------------- | :-------------------------------------------------------- |
 | **app**         | `app_url`                  | 应用地址     | 当前 Grok2API 服务的外部访问 URL，用于文件链接访问。 | `http://127.0.0.1:8000`                                 |
-|                       | `app_key`                  | 后台密码     | 登录 Grok2API 服务管理后台的密码，请妥善保管。       | `grok2api`                                              |
-|                       | `api_key`                  | API 密钥     | 调用 Grok2API 服务所需的 Bearer Token，请妥善保管。  | `""`                                                    |
+|                       | `app_key`                  | 后台密码     | 登录 Grok2API 管理后台的密码（必填）。               | `grok2api`                                              |
+|                       | `api_key`                  | API 密钥     | 调用 Grok2API 服务的 Token（可选）。 | `""`                                    |
 |                       | `image_format`             | 图片格式     | 生成的图片格式（url 或 base64）。                    | `url`                                                   |
-|                       | `video_format`             | 视频格式     | 生成的视频格式（仅支持 url）。                       | `url`                                                   |
+|                       | `video_format`             | 视频格式     | 生成的视频格式（html 或 url，url 为处理后的链接）。  | `html`                                                  |
 | **grok**        | `temporary`                | 临时对话     | 是否启用临时对话模式。                               | `true`                                                  |
 |                       | `stream`                   | 流式响应     | 是否默认启用流式输出。                               | `true`                                                  |
 |                       | `thinking`                 | 思维链       | 是否启用模型思维链输出。                             | `true`                                                  |
@@ -171,21 +202,31 @@ curl http://localhost:8000/v1/images/generations \
 |                       | `cf_clearance`             | CF Clearance | Cloudflare 验证 Cookie，用于验证 Cloudflare 的验证。 | `""`                                                    |
 |                       | `max_retry`                | 最大重试     | 请求 Grok 服务失败时的最大重试次数。                 | `3`                                                     |
 |                       | `retry_status_codes`       | 重试状态码   | 触发重试的 HTTP 状态码列表。                         | `[401, 429, 403]`                                       |
-|                       | `nsfw_feature_key`         | NSFW 功能 Key | UpdateUserFeatureControls 的 feature key（默认 always_show_nsfw_content）。 | `always_show_nsfw_content` |
-|                       | `nsfw_apply_concurrency`   | NSFW 批量并发 | 管理页批量开启 NSFW 的并发数量。 | `5` |
-|                       | `nsfw_apply_delay_ms`      | NSFW 批量延迟 | 批量开启时每个请求后的延迟（毫秒），用于降低风控/限流风险。 | `500` |
+|                       | `retry_backoff_base`       | 退避基数     | 重试退避的基础延迟（秒）。                           | `0.5`                                                   |
+|                       | `retry_backoff_factor`     | 退避倍率     | 重试退避的指数放大系数。                             | `2.0`                                                   |
+|                       | `retry_backoff_max`        | 退避上限     | 单次重试等待的最大延迟（秒）。                       | `30.0`                                                  |
+|                       | `retry_budget`             | 退避预算     | 单次请求的最大重试总耗时（秒）。                     | `90.0`                                                  |
+|                       | `stream_idle_timeout`      | 流空闲超时   | 流式响应空闲超时（秒），超过将断开。                 | `45.0`                                                  |
+|                       | `video_idle_timeout`       | 视频空闲超时 | 视频生成空闲超时（秒），超过将断开。                 | `90.0`                                                  |
 | **token**       | `auto_refresh`             | 自动刷新     | 是否开启 Token 自动刷新机制。                        | `true`                                                  |
 |                       | `refresh_interval_hours`   | 刷新间隔     | Token 刷新的时间间隔（小时）。                       | `8`                                                     |
+|                       | `super_refresh_interval_hours` | Super 刷新间隔 | Super Token 刷新的时间间隔（小时）。               | `2`                                                     |
 |                       | `fail_threshold`           | 失败阈值     | 单个 Token 连续失败多少次后被标记为不可用。          | `5`                                                     |
 |                       | `save_delay_ms`            | 保存延迟     | Token 变更合并写入的延迟（毫秒）。                   | `500`                                                   |
 |                       | `reload_interval_sec`      | 一致性刷新   | 多 worker 场景下 Token 状态刷新间隔（秒）。          | `30`                                                    |
 | **cache**       | `enable_auto_clean`        | 自动清理     | 是否启用缓存自动清理，开启后按上限自动回收。         | `true`                                                  |
 |                       | `limit_mb`                 | 清理阈值     | 缓存大小阈值（MB），超过阈值会触发清理。             | `1024`                                                  |
-| **performance** | `assets_max_concurrent`    | 资产并发上限 | 资源上传/下载/列表的并发上限。推荐 25。              | `25`                                                    |
-|                       | `media_max_concurrent`     | 媒体并发上限 | 视频/媒体生成请求的并发上限。推荐 50。               | `50`                                                    |
-|                       | `usage_max_concurrent`     | 用量并发上限 | 用量查询请求的并发上限。推荐 25。                    | `25`                                                    |
-|                       | `assets_delete_batch_size` | 资产清理批量 | 在线资产删除单批并发数量。推荐 10。                  | `10`                                                    |
-|                       | `admin_assets_batch_size`  | 管理端批量   | 管理端在线资产统计/清理批量并发数量。推荐 10。       | `10`                                                    |
+| **performance** | `nsfw_max_concurrent`      | 开启 NSFW 模式并发上限 | 批量开启 NSFW 模式时的并发请求上限。推荐 10。        | `10`                                                   |
+|                       | `nsfw_batch_size`          | 开启 NSFW 模式批次大小 | 批量开启 NSFW 模式的单批处理数量。推荐 50。          | `50`                                                   |
+|                       | `nsfw_max_tokens`          | 开启 NSFW 模式最大数量 | 单次批量开启 NSFW 的 Token 数量上限，防止误操作。推荐 1000。 | `1000`                                            |
+|                       | `usage_max_concurrent`     | Token 用量刷新并发上限 | 批量刷新 Token 用量时的并发请求上限。推荐 25。        | `25`                                                   |
+|                       | `usage_batch_size`         | Token 用量刷新批次大小 | 批量刷新 Token 用量的单批处理数量。推荐 50。          | `50`                                                   |
+|                       | `usage_max_tokens`         | Token 用量刷新最大数量 | 批量刷新 Token 用量的单次处理数量上限。推荐 1000。    | `1000`                                                 |
+|                       | `assets_max_concurrent`    | 在线资产查找/删除并发上限 | 在线资产查找/删除时的并发请求上限。推荐 25。       | `25`                                                   |
+|                       | `assets_batch_size`        | 在线资产查找/删除批次大小 | 在线资产查找/删除的单批处理数量。推荐 10。        | `10`                                                   |
+|                       | `assets_max_tokens`        | 在线资产查找/删除最大数量 | 在线资产查找/删除的单次处理数量上限。推荐 1000。  | `1000`                                                 |
+|                       | `assets_delete_batch_size` | 在线资产删除批量 | 在线资产删除单批并发数量。推荐 10。                  | `10`                                                   |
+|                       | `media_max_concurrent`     | 媒体并发上限 | 视频/媒体生成请求的并发上限。推荐 50。               | `50`                                                   |
 
 <br>
 
