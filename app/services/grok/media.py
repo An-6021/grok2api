@@ -48,6 +48,16 @@ def _get_media_semaphore() -> asyncio.Semaphore:
     return _MEDIA_SEMAPHORE
 
 
+def _compact_snippet(text: str, limit: int = 200) -> str:
+    """压缩响应片段，便于日志/错误详情展示。"""
+    if not text:
+        return ""
+    snippet = " ".join(str(text).split())
+    if limit and len(snippet) > limit:
+        return snippet[:limit]
+    return snippet
+
+
 class VideoService:
     """视频生成服务"""
 
@@ -128,27 +138,75 @@ class VideoService:
             else:
                 payload = {"mediaType": media_type, "prompt": prompt}
 
-            async with AsyncSession() as session:
-                response = await session.post(
-                    CREATE_POST_API,
-                    headers=headers,
-                    json=payload,
-                    impersonate=BROWSER,
-                    timeout=30,
-                    proxies=self._build_proxies(),
-                )
+            proxies = self._build_proxies()
+
+            async def _do_request():
+                async with AsyncSession(impersonate=BROWSER) as session:
+                    return await session.post(
+                        CREATE_POST_API,
+                        headers=headers,
+                        json=payload,
+                        timeout=30,
+                        proxies=proxies,
+                    )
+
+            age_verify_attempted = False
+            response = await _do_request()
+
+            # 403 常见原因：需要年龄验证 / Cloudflare 拦截。
+            # 这里尝试复用 Imagine WS 的自动年龄验证逻辑后重试一次。
+            if response.status_code == 403:
+                age_verify_attempted = True
+                try:
+                    from app.services.grok.imagine_ws import imagine_ws_service
+
+                    await imagine_ws_service._ensure_age_verified(token)
+                except Exception as e:
+                    logger.warning(f"Create post: age verify attempt failed: {str(e)[:120]}")
+                response = await _do_request()
 
             if response.status_code != 200:
-                logger.error(f"Create post failed: {response.status_code}")
+                resp_headers = {}
+                try:
+                    resp_headers = dict(response.headers)
+                except Exception:
+                    resp_headers = {}
+
+                body = ""
+                try:
+                    body = await response.text()
+                except Exception:
+                    try:
+                        body = (response.content or b"").decode("utf-8", errors="replace")
+                    except Exception:
+                        body = ""
+
+                snippet = _compact_snippet(body, 240)
+                logger.warning(
+                    f"Create post failed: {response.status_code} "
+                    f"(ct={resp_headers.get('content-type','')}, cf-ray={resp_headers.get('cf-ray','')}) "
+                    + (f"snippet={snippet}" if snippet else "")
+                )
+
+                details = {
+                    "status": response.status_code,
+                    "headers": resp_headers,
+                    "body": snippet,
+                }
+                if age_verify_attempted:
+                    details["age_verify_attempted"] = True
                 raise UpstreamException(
-                    f"Failed to create post: {response.status_code}"
+                    message=f"Failed to create post: {response.status_code}",
+                    details=details,
                 )
 
             data = response.json()
             post_id = data.get("post", {}).get("id", "")
 
             if not post_id:
-                raise UpstreamException("No post ID in response")
+                raise UpstreamException(
+                    "No post ID in response", details={"status": 200, "body": _compact_snippet(str(data), 240)}
+                )
 
             logger.info(f"Media post created: {post_id} (type={media_type})")
             return post_id

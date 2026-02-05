@@ -317,6 +317,7 @@ class GrokChatService:
         )
         proxies = {"http": self.proxy, "https": self.proxy} if self.proxy else None
         timeout = get_config("grok.timeout", TIMEOUT)
+        age_verify_attempted = False
 
         # 状态码提取器
         def extract_status(e: Exception) -> int | None:
@@ -327,6 +328,7 @@ class GrokChatService:
         # 建立连接函数
         async def establish_connection():
             """建立连接并返回 response 对象"""
+            nonlocal age_verify_attempted
             session = AsyncSession(impersonate=BROWSER)
             try:
                 response = await session.post(
@@ -361,6 +363,19 @@ class GrokChatService:
                         "Grok API error response "
                         f"(status={response.status_code}, headers={resp_headers}): {body_for_log}"
                     )
+
+                    # 403 常见原因：首次使用 Imagine/Media 需要年龄验证。
+                    # 这里在第一次遇到 403 时尝试自动年龄验证，并交给 retry 机制重试。
+                    if response.status_code == 403 and not age_verify_attempted:
+                        age_verify_attempted = True
+                        try:
+                            from app.services.grok.imagine_ws import imagine_ws_service
+
+                            await imagine_ws_service._ensure_age_verified(token)
+                        except Exception as e:
+                            logger.warning(
+                                f"Chat: age verify attempt failed: {str(e)[:120]}"
+                            )
                     # 关闭 session 并抛出异常
                     try:
                         await session.close()
@@ -372,6 +387,7 @@ class GrokChatService:
                             "status": response.status_code,
                             "body": content,
                             "headers": resp_headers,
+                            "age_verify_attempted": age_verify_attempted,
                         },
                     )
 

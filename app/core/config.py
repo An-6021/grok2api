@@ -8,6 +8,8 @@
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict
+import os
+import json
 import tomllib
 
 from app.core.logger import logger
@@ -135,8 +137,68 @@ class Config:
 config = Config()
 
 
+def _env_key(key: str) -> str:
+    """将配置 key 映射为环境变量名：section.key -> SECTION_KEY"""
+    return str(key or "").strip().upper().replace(".", "_")
+
+
+def _coerce_env_value(raw: str, default: Any) -> Any:
+    """按 default 类型将环境变量字符串转换为目标类型。"""
+    if raw is None:
+        return default
+
+    # 保留空字符串（例如清空 proxy/cf_clearance）
+    if isinstance(default, str):
+        return raw
+
+    s = raw.strip()
+
+    if isinstance(default, bool):
+        if s.lower() in ("1", "true", "yes", "y", "on"):
+            return True
+        if s.lower() in ("0", "false", "no", "n", "off"):
+            return False
+        return default
+
+    if isinstance(default, int) and not isinstance(default, bool):
+        try:
+            return int(s)
+        except Exception:
+            return default
+
+    if isinstance(default, float):
+        try:
+            return float(s)
+        except Exception:
+            return default
+
+    if isinstance(default, (list, dict)):
+        # 优先 JSON，其次逗号分隔（仅 list）
+        try:
+            parsed = json.loads(s)
+            if isinstance(default, list) and isinstance(parsed, list):
+                return parsed
+            if isinstance(default, dict) and isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+
+        if isinstance(default, list):
+            if not s:
+                return []
+            return [item.strip() for item in s.split(",") if item.strip()]
+
+        return default
+
+    # default 为 None 或未知类型：直接返回原始字符串
+    return raw
+
+
 def get_config(key: str, default: Any = None) -> Any:
     """获取配置"""
+    env_name = _env_key(key)
+    if env_name in os.environ:
+        return _coerce_env_value(os.environ.get(env_name), default)
     return config.get(key, default)
 
 
