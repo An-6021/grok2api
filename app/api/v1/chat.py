@@ -9,6 +9,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 from app.services.grok.chat import ChatService
+from app.services.grok.imagine_chat import ImagineChatService
 from app.services.grok.model import ModelService
 from app.core.exceptions import ValidationException
 
@@ -98,12 +99,16 @@ class ChatCompletionRequest(BaseModel):
     messages: List[MessageItem] = Field(..., description="消息数组")
     stream: Optional[bool] = Field(None, description="是否流式输出")
     thinking: Optional[str] = Field(None, description="思考模式: enabled/disabled/None")
+
+    # 图像生成配置（用于部分客户端走 chat/completions 生成图片）
+    image_config: Optional[Any] = Field(None, description="图像生成配置", alias="imageConfig")
     
     # 视频生成配置
     video_config: Optional[VideoConfig] = Field(None, description="视频生成参数")
     
     model_config = {
-        "extra": "ignore"
+        "extra": "ignore",
+        "populate_by_name": True,
     }
 
 
@@ -209,7 +214,16 @@ async def chat_completions(request: ChatCompletionRequest):
     
     # 检测视频模型
     model_info = ModelService.get(request.model)
-    if model_info and model_info.is_video:
+    if model_info and model_info.model_mode == "MODEL_MODE_IMAGINE_WS":
+        # Imagine 2.0：走 WebSocket imagine 通道，避免调用 REST chat 导致 403
+        result = await ImagineChatService.completions(
+            model=request.model,
+            messages=[msg.model_dump() for msg in request.messages],
+            stream=request.stream,
+            thinking=request.thinking,
+            image_config=request.image_config,
+        )
+    elif model_info and model_info.is_video:
         from app.services.grok.media import VideoService
         
         # 提取视频配置 (默认值在 Pydantic 模型中处理)

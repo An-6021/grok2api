@@ -6,6 +6,8 @@ let isBatchPaused = false;
 let batchQueue = [];
 let batchTotal = 0;
 let batchProcessed = 0;
+let batchSuccess = 0;
+let batchFail = 0;
 let currentBatchAction = null;
 const BATCH_SIZE = 50;
 
@@ -578,10 +580,14 @@ function stopBatchRefresh() {
 
 function finishBatchProcess(aborted = false) {
   const action = currentBatchAction;
+  const nsfwSuccess = batchSuccess;
+  const nsfwFail = batchFail;
   isBatchProcessing = false;
   isBatchPaused = false;
   batchQueue = [];
   currentBatchAction = null;
+  batchSuccess = 0;
+  batchFail = 0;
 
   updateBatchProgress();
   setActionButtonsState();
@@ -594,7 +600,12 @@ function finishBatchProcess(aborted = false) {
     else showToast('已终止刷新', 'info');
   } else {
     if (action === 'delete') showToast('删除完成', 'success');
-    else if (action === 'nsfw') showToast('NSFW 完成', 'success');
+    else if (action === 'nsfw') {
+      const msg = nsfwFail > 0
+        ? `NSFW 部分失败：成功 ${nsfwSuccess}，失败 ${nsfwFail}`
+        : `NSFW 完成：成功 ${nsfwSuccess}`;
+      showToast(msg, nsfwFail > 0 ? 'error' : 'success');
+    }
     else showToast('刷新完成', 'success');
   }
 }
@@ -625,6 +636,8 @@ async function startBatchNsfw() {
   batchQueue = selected.map(t => t.token);
   batchTotal = batchQueue.length;
   batchProcessed = 0;
+  batchSuccess = 0;
+  batchFail = 0;
 
   updateBatchProgress();
   setActionButtonsState();
@@ -652,13 +665,32 @@ async function processNsfwQueue() {
     });
 
     if (res.ok) {
+      // 后端会返回每个 token 的 ok/message + summary(success/fail)
+      try {
+        const data = await res.json();
+        const summary = data && data.summary ? data.summary : null;
+        const s = summary ? Number(summary.success || 0) : 0;
+        const f = summary ? Number(summary.fail || 0) : 0;
+        if (s + f > 0) {
+          batchSuccess += s;
+          batchFail += f;
+        } else {
+          // 兼容非预期响应：按 chunk 计成功
+          batchSuccess += chunk.length;
+        }
+      } catch (e) {
+        // JSON 解析失败时：不影响流程，但按 chunk 计成功
+        batchSuccess += chunk.length;
+      }
       batchProcessed += chunk.length;
     } else {
       showToast('部分 NSFW 操作失败', 'error');
+      batchFail += chunk.length;
       batchProcessed += chunk.length;
     }
   } catch (e) {
     showToast('网络请求错误', 'error');
+    batchFail += chunk.length;
     batchProcessed += chunk.length;
   }
 
@@ -682,7 +714,11 @@ function updateBatchProgress() {
     return;
   }
   const pct = batchTotal ? Math.floor((batchProcessed / batchTotal) * 100) : 0;
-  text.textContent = `${pct}%`;
+  let extra = '';
+  if (currentBatchAction === 'nsfw') {
+    extra = `（成功 ${batchSuccess} / 失败 ${batchFail}）`;
+  }
+  text.textContent = `${pct}%${extra}`;
   container.classList.remove('hidden');
   if (pauseBtn) {
     pauseBtn.textContent = isBatchPaused ? '继续' : '暂停';

@@ -8,6 +8,7 @@ import orjson
 from typing import Any, AsyncGenerator, Optional, AsyncIterable, List
 
 from app.core.config import get_config
+from app.core.exceptions import UpstreamException
 from app.core.logger import logger
 from app.services.grok.assets import DownloadService
 
@@ -39,10 +40,22 @@ class BaseProcessor:
 
     async def process_url(self, path: str, media_type: str = "image") -> str:
         """处理资产 URL"""
+        if not path or not str(path).strip():
+            raise ValueError("empty asset url")
+        path = str(path).strip()
+
         # 处理可能的绝对路径
         if path.startswith("http"):
             from urllib.parse import urlparse
-            path = urlparse(path).path
+            path = urlparse(path).path or ""
+
+        # 兜底：去掉可能存在的 querystring
+        if "?" in path:
+            path = path.split("?", 1)[0]
+
+        # 空路径会导致 /v1/files/image/ 这种裂图请求
+        if not path or path == "/":
+            raise ValueError("empty asset path")
             
         if not path.startswith("/"):
             path = f"/{path}"
@@ -137,24 +150,44 @@ class StreamProcessor(BaseProcessor):
                         if msg := mr.get("message"):
                             yield self._sse(msg + "\n")
                         yield self._sse("</think>\n")
-                        self.think_opened = False
+                    self.think_opened = False
                     
                     # 处理生成的图片
                     for url in mr.get("generatedImageUrls", []):
+                        if not isinstance(url, str) or not url.strip():
+                            yield self._sse("[图片生成失败：上游返回空 URL]\n")
+                            continue
+
+                        url = url.strip()
                         parts = url.split("/")
-                        img_id = parts[-2] if len(parts) >= 2 else "image"
+                        img_id = parts[-2] if len(parts) >= 2 and parts[-2] else "image"
                         
                         if self.image_format == "base64":
                             dl_service = self._get_dl()
-                            base64_data = await dl_service.to_base64(url, self.token, "image")
+                            base64_data = ""
+                            base64_err = None
+                            try:
+                                base64_data = await dl_service.to_base64(url, self.token, "image")
+                            except Exception as e:
+                                base64_err = e
                             if base64_data:
                                 yield self._sse(f"![{img_id}]({base64_data})\n")
                             else:
+                                try:
+                                    final_url = await self.process_url(url, "image")
+                                    yield self._sse(f"![{img_id}]({final_url})\n")
+                                except Exception as e:
+                                    err = str(base64_err or e)[:120]
+                                    logger.warning(f"Image render failed: {err}", extra={"model": self.model})
+                                    yield self._sse(f"[图片生成失败：{err}]\n")
+                        else:
+                            try:
                                 final_url = await self.process_url(url, "image")
                                 yield self._sse(f"![{img_id}]({final_url})\n")
-                        else:
-                            final_url = await self.process_url(url, "image")
-                            yield self._sse(f"![{img_id}]({final_url})\n")
+                            except Exception as e:
+                                err = str(e)[:120]
+                                logger.warning(f"Image render failed: {err}", extra={"model": self.model})
+                                yield self._sse(f"[图片生成失败：{err}]\n")
                     
                     if (meta := mr.get("metadata", {})).get("llm_info", {}).get("modelHash"):
                         self.fingerprint = meta["llm_info"]["modelHash"]
@@ -210,20 +243,40 @@ class CollectProcessor(BaseProcessor):
                     if urls := mr.get("generatedImageUrls"):
                         content += "\n"
                         for url in urls:
+                            if not isinstance(url, str) or not url.strip():
+                                content += "[图片生成失败：上游返回空 URL]\n"
+                                continue
+
+                            url = url.strip()
                             parts = url.split("/")
-                            img_id = parts[-2] if len(parts) >= 2 else "image"
+                            img_id = parts[-2] if len(parts) >= 2 and parts[-2] else "image"
                             
                             if self.image_format == "base64":
                                 dl_service = self._get_dl()
-                                base64_data = await dl_service.to_base64(url, self.token, "image")
+                                base64_data = ""
+                                base64_err = None
+                                try:
+                                    base64_data = await dl_service.to_base64(url, self.token, "image")
+                                except Exception as e:
+                                    base64_err = e
                                 if base64_data:
                                     content += f"![{img_id}]({base64_data})\n"
                                 else:
+                                    try:
+                                        final_url = await self.process_url(url, "image")
+                                        content += f"![{img_id}]({final_url})\n"
+                                    except Exception as e:
+                                        err = str(base64_err or e)[:120]
+                                        logger.warning(f"Image render failed: {err}", extra={"model": self.model})
+                                        content += f"[图片生成失败：{err}]\n"
+                            else:
+                                try:
                                     final_url = await self.process_url(url, "image")
                                     content += f"![{img_id}]({final_url})\n"
-                            else:
-                                final_url = await self.process_url(url, "image")
-                                content += f"![{img_id}]({final_url})\n"
+                                except Exception as e:
+                                    err = str(e)[:120]
+                                    logger.warning(f"Image render failed: {err}", extra={"model": self.model})
+                                    content += f"[图片生成失败：{err}]\n"
                     
                     if (meta := mr.get("metadata", {})).get("llm_info", {}).get("modelHash"):
                         fingerprint = meta["llm_info"]["modelHash"]
@@ -450,19 +503,35 @@ class ImageStreamProcessor(BaseProcessor):
                 if mr := resp.get("modelResponse"):
                     if urls := mr.get("generatedImageUrls"):
                         for url in urls:
-                            if self.output_format == "url":
-                                final_url = await self.process_url(url, "image")
-                                final_items.append(final_url)
-                            else:
-                                dl_service = self._get_dl()
-                                base64_data = await dl_service.to_base64(url, self.token, "image")
-                                if base64_data:
-                                    if "," in base64_data:
-                                        b64 = base64_data.split(",", 1)[1]
-                                    else:
-                                        b64 = base64_data
-                                    final_items.append(b64)
+                            if not isinstance(url, str) or not url.strip():
+                                logger.warning("Image stream got empty url", extra={"model": self.model})
+                                continue
+
+                            url = url.strip()
+                            try:
+                                if self.output_format == "url":
+                                    final_url = await self.process_url(url, "image")
+                                    final_items.append(final_url)
+                                else:
+                                    dl_service = self._get_dl()
+                                    base64_data = await dl_service.to_base64(url, self.token, "image")
+                                    if base64_data:
+                                        if "," in base64_data:
+                                            b64 = base64_data.split(",", 1)[1]
+                                        else:
+                                            b64 = base64_data
+                                        final_items.append(b64)
+                            except Exception as e:
+                                logger.warning(f"Image stream item failed: {str(e)[:120]}", extra={"model": self.model})
                     continue
+
+            if not final_items:
+                yield self._sse("image_generation.error", {
+                    "type": "image_generation.error",
+                    "message": "图片生成失败：未获取到有效图片资源",
+                    "code": "image_generation_failed",
+                })
+                return
                     
             for index, item in enumerate(final_items):
                 if self.n == 1:
@@ -501,7 +570,8 @@ class ImageCollectProcessor(BaseProcessor):
     
     async def process(self, response: AsyncIterable[bytes]) -> List[str]:
         """处理并收集图片"""
-        images = []
+        images: List[str] = []
+        errors: List[str] = []
         
         try:
             async for line in response:
@@ -517,21 +587,33 @@ class ImageCollectProcessor(BaseProcessor):
                 if mr := resp.get("modelResponse"):
                     if urls := mr.get("generatedImageUrls"):
                         for url in urls:
-                            if self.output_format == "url":
-                                final_url = await self.process_url(url, "image")
-                                images.append(final_url)
-                            else:
-                                dl_service = self._get_dl()
-                                base64_data = await dl_service.to_base64(url, self.token, "image")
-                                if base64_data:
-                                    if "," in base64_data:
-                                        b64 = base64_data.split(",", 1)[1]
-                                    else:
-                                        b64 = base64_data
-                                    images.append(b64)
+                            if not isinstance(url, str) or not url.strip():
+                                errors.append("empty image url")
+                                continue
+
+                            url = url.strip()
+                            try:
+                                if self.output_format == "url":
+                                    final_url = await self.process_url(url, "image")
+                                    images.append(final_url)
+                                else:
+                                    dl_service = self._get_dl()
+                                    base64_data = await dl_service.to_base64(url, self.token, "image")
+                                    if base64_data:
+                                        if "," in base64_data:
+                                            b64 = base64_data.split(",", 1)[1]
+                                        else:
+                                            b64 = base64_data
+                                        images.append(b64)
+                            except Exception as e:
+                                errors.append(str(e)[:200])
                                 
+            if not images:
+                reason = errors[0] if errors else "no images returned"
+                raise UpstreamException(f"Image generation failed: {reason}")
         except Exception as e:
             logger.error(f"Image collect processing error: {e}")
+            raise
         finally:
             await self.close()
         

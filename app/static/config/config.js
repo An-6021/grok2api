@@ -2,6 +2,13 @@ let apiKey = '';
 let currentConfig = {};
 const NUMERIC_FIELDS = new Set([
   'timeout',
+  'imagine_timeout',
+  'imagine_receive_timeout_sec',
+  'imagine_blocked_after_sec',
+  'imagine_idle_finish_sec',
+  'imagine_stream_heartbeat_sec',
+  'imagine_stream_timeout_buffer_sec',
+  'imagine_chat_default_n',
   'max_retry',
   'refresh_interval_hours',
   'fail_threshold',
@@ -14,7 +21,8 @@ const NUMERIC_FIELDS = new Set([
   'admin_assets_batch_size',
   'reload_interval_sec',
   'nsfw_apply_concurrency',
-  'nsfw_apply_delay_ms'
+  'nsfw_apply_delay_ms',
+  'imagine_max_concurrent'
 ]);
 
 const LOCALE_MAP = {
@@ -37,6 +45,18 @@ const LOCALE_MAP = {
     "base_proxy_url": { title: "基础代理 URL", desc: "代理请求到 Grok 官网的基础服务地址。" },
     "asset_proxy_url": { title: "资源代理 URL", desc: "代理请求到 Grok 官网的静态资源（图片/视频）地址。" },
     "cf_clearance": { title: "CF Clearance", desc: "Cloudflare 验证 Cookie，用于验证 Cloudflare 的验证。" },
+    "imagine_ws_url": { title: "Imagine WS URL", desc: "Grok Imagine WebSocket 地址（一般无需修改）。" },
+    "imagine_timeout": { title: "Imagine 超时", desc: "Imagine WebSocket 图片生成的总超时时间（秒）。" },
+    "imagine_receive_timeout_sec": { title: "Imagine 接收超时", desc: "WebSocket 单次 receive 超时（秒），用于驱动 blocked/idle 检测。" },
+    "imagine_blocked_after_sec": { title: "Blocked 判定", desc: "收到 medium 阶段后超过该秒数仍无 final，则认为 blocked。" },
+    "imagine_idle_finish_sec": { title: "Idle 结束", desc: "已生成部分 final 图片且超过该秒数无新消息，则认为生成结束。" },
+    "imagine_stream_heartbeat_sec": { title: "流式心跳", desc: "Imagine 流式返回时的心跳间隔（秒），用于避免客户端长时间无输出而卡住。" },
+    "imagine_stream_timeout_buffer_sec": { title: "超时缓冲", desc: "在 imagine_timeout 基础上额外增加的超时缓冲（秒），用于覆盖 WebSocket 握手卡住等场景。" },
+    "imagine_chat_default_n": { title: "Chat 默认张数", desc: "当客户端走 /v1/chat/completions 调用 imagine 模型且未指定张数时，默认生成图片数量（1-4）。" },
+    "imagine_default_aspect_ratio": { title: "默认比例", desc: "size 未命中时的默认宽高比（1:1 / 2:3 / 3:2）。" },
+    "imagine_enable_nsfw": { title: "NSFW 模式", desc: "是否在 Imagine 请求中开启 enable_nsfw。" },
+    "imagine_auto_age_verify": { title: "自动年龄验证", desc: "是否在需要时自动调用 set-birth-date 进行年龄验证（依赖 CF Clearance）。" },
+    "imagine_birth_date": { title: "生日参数", desc: "set-birth-date 提交的 birthDate 值（ISO 字符串）。" },
     "max_retry": { title: "最大重试", desc: "请求 Grok 服务失败时的最大重试次数。" },
     "retry_status_codes": { title: "重试状态码", desc: "触发重试的 HTTP 状态码列表。" },
     "nsfw_feature_key": { title: "NSFW 功能 Key", desc: "UpdateUserFeatureControls 的 feature key（默认 always_show_nsfw_content）。" },
@@ -61,6 +81,7 @@ const LOCALE_MAP = {
     "assets_max_concurrent": { title: "资产并发上限", desc: "资源上传/下载/列表的并发上限。推荐 25。" },
     "media_max_concurrent": { title: "媒体并发上限", desc: "视频/媒体生成请求的并发上限。推荐 50。" },
     "usage_max_concurrent": { title: "用量并发上限", desc: "用量查询请求的并发上限。推荐 25。" },
+    "imagine_max_concurrent": { title: "Imagine 并发上限", desc: "Imagine WebSocket 图片生成的并发上限。推荐 20。" },
     "assets_delete_batch_size": { title: "资产清理批量", desc: "在线资产删除单批并发数量。推荐 10。" },
     "admin_assets_batch_size": { title: "管理端批量", desc: "管理端在线资产统计/清理批量并发数量。推荐 10。" }
   }

@@ -178,6 +178,49 @@ class TokenManager:
             return token[4:]
         return token
 
+    def find(self, token_str: str) -> Optional[TokenInfo]:
+        """
+        查找 TokenInfo
+
+        Args:
+            token_str: token 字符串（可带 sso= 前缀）
+
+        Returns:
+            TokenInfo 或 None
+        """
+        raw_token = token_str.replace("sso=", "")
+        for pool in self.pools.values():
+            info = pool.get(raw_token)
+            if info:
+                return info
+        return None
+
+    async def add_tag(self, token_str: str, tag: str) -> bool:
+        """
+        为 token 添加 tag（用于持久化一些状态，例如 imagine 年龄验证）。
+
+        Args:
+            token_str: token 字符串（可带 sso= 前缀）
+            tag: tag 字符串
+
+        Returns:
+            是否成功
+        """
+        if not tag or not str(tag).strip():
+            return False
+
+        info = self.find(token_str)
+        if not info:
+            return False
+
+        if info.tags is None:
+            info.tags = []
+
+        if tag not in info.tags:
+            info.tags.append(tag)
+            self._schedule_save()
+        return True
+
     async def consume(self, token_str: str, effort: EffortType = EffortType.LOW) -> bool:
         """
         消耗配额（本地预估）

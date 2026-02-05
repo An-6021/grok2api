@@ -105,6 +105,24 @@ class ModelService:
             is_image=True
         ),
         ModelInfo(
+            model_id="grok-imagine-2.0",
+            grok_model="grok-2-image",
+            model_mode="MODEL_MODE_IMAGINE_WS",
+            cost=Cost.HIGH,
+            display_name="Grok Imagine 2.0",
+            description="Image generation model (WebSocket Imagine)",
+            is_image=True
+        ),
+        ModelInfo(
+            model_id="grok-2-image",
+            grok_model="grok-2-image",
+            model_mode="MODEL_MODE_IMAGINE_WS",
+            cost=Cost.HIGH,
+            display_name="Grok 2 Image",
+            description="Alias of grok-imagine-2.0 (WebSocket Imagine)",
+            is_image=True
+        ),
+        ModelInfo(
             model_id="grok-imagine-1.0-video",
             grok_model="grok-3",
             model_mode="MODEL_MODE_FAST",
