@@ -38,7 +38,7 @@ class ImageGenerationRequest(BaseModel):
     stream: Optional[bool] = Field(False, description="是否流式输出")
 
 
-IMAGINE_WS_MODELS = {"grok-imagine-2.0", "grok-2-image"}
+IMAGINE_WS_MODELS = {"grok-imagine-2.0"}
 
 
 def is_imagine_ws_model(model_id: str) -> bool:
@@ -445,4 +445,3 @@ async def create_image(request: ImageGenerationRequest):
 
 
 __all__ = ["router"]
-
