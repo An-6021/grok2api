@@ -12,8 +12,9 @@ services:
       LOG_LEVEL: INFO
       SERVER_PORT: 8000
       SERVER_WORKERS: 1
-      SERVER_STORAGE_TYPE: local
-      # SERVER_STORAGE_URL:
+      # Use .env / Zeabur env vars (avoid committing credentials)
+      SERVER_STORAGE_TYPE: ${SERVER_STORAGE_TYPE:-local}
+      SERVER_STORAGE_URL: ${SERVER_STORAGE_URL:-}
 
       # SERVER_STORAGE_TYPE: (local, redis, mysql, pgsql) default: local
       # SERVER_STORAGE_URL: (local mode is empty) default: empty

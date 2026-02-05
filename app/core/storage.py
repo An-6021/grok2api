@@ -15,6 +15,7 @@ import asyncio
 import hashlib
 import time
 import tomllib
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from typing import Any, Dict, Optional
 from pathlib import Path
 from enum import Enum
@@ -760,6 +761,53 @@ class StorageFactory:
     _instance: Optional[BaseStorage] = None
 
     @staticmethod
+    def _normalize_asyncpg_query(url: str) -> str:
+        """
+        兼容 libpq 风格参数到 asyncpg 连接参数。
+
+        SQLAlchemy asyncpg 方言会将 URL query 直接透传为 asyncpg.connect(**kwargs)；
+        但 libpq 常见参数例如 `sslmode` / `channel_binding` 并不是 asyncpg.connect 的关键字参数，
+        会导致类似：connect() got an unexpected keyword argument 'sslmode'。
+
+        这里将 `sslmode=<mode>` 映射为 `ssl=<mode>`，并丢弃 `channel_binding`。
+        asyncpg 支持 `ssl` 传入字符串模式（disable/allow/prefer/require/verify-ca/verify-full）。
+        """
+
+        try:
+            parts = urlsplit(url)
+            if not parts.query:
+                return url
+
+            items = parse_qsl(parts.query, keep_blank_values=True)
+            sslmode = None
+            has_ssl = False
+            cleaned: list[tuple[str, str]] = []
+
+            for k, v in items:
+                lk = k.lower()
+                if lk == "ssl":
+                    has_ssl = True
+                    cleaned.append((k, v))
+                    continue
+                if lk == "sslmode":
+                    sslmode = v
+                    continue
+                if lk == "channel_binding":
+                    # asyncpg 不支持该参数，忽略即可
+                    continue
+                cleaned.append((k, v))
+
+            if sslmode and not has_ssl:
+                cleaned.append(("ssl", sslmode))
+
+            new_query = urlencode(cleaned, doseq=True)
+            return urlunsplit(
+                (parts.scheme, parts.netloc, parts.path, new_query, parts.fragment)
+            )
+        except Exception:
+            return url
+
+    @staticmethod
     def _normalize_sql_url(storage_type: str, url: str) -> str:
         if not url or "://" not in url:
             return url
@@ -770,11 +818,16 @@ class StorageFactory:
                 return f"mariadb+aiomysql://{url[len('mariadb://') :]}"
         if storage_type == "pgsql":
             if url.startswith("postgres://"):
-                return f"postgresql+asyncpg://{url[len('postgres://') :]}"
+                url = f"postgresql+asyncpg://{url[len('postgres://') :]}"
             if url.startswith("postgresql://"):
-                return f"postgresql+asyncpg://{url[len('postgresql://') :]}"
+                url = f"postgresql+asyncpg://{url[len('postgresql://') :]}"
             if url.startswith("pgsql://"):
-                return f"postgresql+asyncpg://{url[len('pgsql://') :]}"
+                url = f"postgresql+asyncpg://{url[len('pgsql://') :]}"
+
+            # asyncpg 方言下将 libpq query 参数做兼容（避免 sslmode / channel_binding 报错）
+            if url.startswith("postgresql+asyncpg://"):
+                url = StorageFactory._normalize_asyncpg_query(url)
+
         return url
 
     @classmethod
