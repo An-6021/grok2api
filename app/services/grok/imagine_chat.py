@@ -293,8 +293,6 @@ class ImagineChatService:
 
         # 先发 role
         yield _sse_chunk(chunk_id, model, created, role="assistant")
-        # 先输出一行可见内容，避免某些客户端只显示“思考中”但不渲染 <think> 内文本
-        yield _sse_chunk(chunk_id, model, created, content="正在生成图片...\n")
 
         think_opened = False
         if show_think:
@@ -306,6 +304,9 @@ class ImagineChatService:
                 created,
                 content=f"正在生成图片（aspect_ratio={aspect_ratio}，n={n}）...\n",
             )
+        else:
+            # 未开启 thinking 时，输出一行可见内容，避免客户端长时间无内容显示
+            yield _sse_chunk(chunk_id, model, created, content="正在生成图片...\n")
 
         # 阶段变化去重
         image_stage: Dict[str, str] = {}

@@ -193,7 +193,10 @@ class ChatRequestBuilder:
         # Cookie
         token = token[4:] if token.startswith("sso=") else token
         cf = get_config("grok.cf_clearance", "")
-        headers["Cookie"] = f"sso={token};cf_clearance={cf}" if cf else f"sso={token}"
+        cookie_parts = [f"sso={token}", f"sso-rw={token}"]
+        if cf:
+            cookie_parts.append(f"cf_clearance={cf}")
+        headers["Cookie"] = "; ".join(cookie_parts)
 
         return headers
 
