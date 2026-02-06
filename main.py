@@ -19,6 +19,7 @@ if env_file.exists():
 from fastapi import FastAPI  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi import Depends  # noqa: E402
+from fastapi.responses import RedirectResponse  # noqa: E402
 
 from app.core.auth import verify_api_key  # noqa: E402
 from app.core.config import get_config  # noqa: E402
@@ -82,6 +83,11 @@ def create_app() -> FastAPI:
         title="Grok2API",
         lifespan=lifespan,
     )
+
+    # 访问根路径时自动跳转到管理面板
+    @app.get("/", include_in_schema=False)
+    async def _root_redirect():
+        return RedirectResponse(url="/admin")
 
     # CORS 配置
     app.add_middleware(

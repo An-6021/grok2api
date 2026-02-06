@@ -38,6 +38,8 @@ class ChatRequest:
     messages: List[Dict[str, Any]]
     stream: bool = None
     think: bool = None
+    # 上游 REST chat 要求的 customPersonality（优先使用该字段；否则从 messages 的 system/developer 提取）
+    custom_personality: str | None = None
 
 
 class MessageExtractor:
@@ -49,8 +51,49 @@ class MessageExtractor:
     VIDEO_UNSUPPORTED = {"input_audio", "file"}
 
     @staticmethod
+    def _coerce_text(value: Any, depth: int = 0) -> str:
+        """将不同结构的文本内容归一化为字符串。"""
+        if depth > 4 or value is None:
+            return ""
+
+        if isinstance(value, str):
+            text = value.strip()
+            if text.lower() in ("", "undefined", "[undefined]", "null", "none"):
+                return ""
+            return text
+
+        if isinstance(value, list):
+            parts: List[str] = []
+            for item in value:
+                text = MessageExtractor._coerce_text(item, depth + 1)
+                if text:
+                    parts.append(text)
+            return "\n".join(parts).strip()
+
+        if isinstance(value, dict):
+            if value.get("enabled") is False:
+                return ""
+
+            item_type = str(value.get("type", "")).strip().lower()
+            if item_type in ("text", "input_text"):
+                text = MessageExtractor._coerce_text(value.get("text"), depth + 1)
+                if text:
+                    return text
+
+            for key in ("text", "content", "value", "prompt", "message"):
+                if key not in value:
+                    continue
+                text = MessageExtractor._coerce_text(value.get(key), depth + 1)
+                if text:
+                    return text
+
+        return ""
+
+    @staticmethod
     def extract(
-        messages: List[Dict[str, Any]], is_video: bool = False
+        messages: List[Dict[str, Any]],
+        is_video: bool = False,
+        exclude_roles: set[str] | None = None,
     ) -> tuple[str, List[str]]:
         """
         从 OpenAI 消息格式提取内容
@@ -58,6 +101,7 @@ class MessageExtractor:
         Args:
             messages: OpenAI 格式消息列表
             is_video: 是否为视频模型
+            exclude_roles: 需要从 message 拼接中排除的角色（如 system/developer）
 
         Returns:
             (text, attachments): 拼接后的文本和需要上传的附件列表
@@ -70,26 +114,39 @@ class MessageExtractor:
 
         # 先抽取每条消息的文本，保留角色信息用于合并
         extracted: List[Dict[str, str]] = []
+        exclude_roles = {str(r or "").strip().lower() for r in (exclude_roles or set())}
 
         for msg in messages:
-            role = msg.get("role", "")
-            content = msg.get("content", "")
+            role = str((msg or {}).get("role", "") or "").strip().lower()
+            if role in exclude_roles:
+                continue
+            content = (msg or {}).get("content", "")
             parts = []
 
             # 简单字符串内容
             if isinstance(content, str):
-                if content.strip():
-                    parts.append(content)
+                text = MessageExtractor._coerce_text(content)
+                if text:
+                    parts.append(text)
 
-            # 列表格式内容
-            elif isinstance(content, list):
-                for item in content:
-                    item_type = item.get("type", "")
+            # 对象/列表格式内容
+            elif isinstance(content, (dict, list)):
+                items = [content] if isinstance(content, dict) else content
+                for item in items:
+                    if not isinstance(item, dict):
+                        text = MessageExtractor._coerce_text(item)
+                        if text:
+                            parts.append(text)
+                        continue
+
+                    item_type = str(item.get("type", "")).strip().lower()
 
                     # 文本类型
-                    if item_type == "text":
-                        text = item.get("text", "")
-                        if text.strip():
+                    if item_type in ("text", "input_text") or (
+                        not item_type and "text" in item
+                    ):
+                        text = MessageExtractor._coerce_text(item.get("text"))
+                        if text:
                             parts.append(text)
 
                     # 图片类型
@@ -151,6 +208,28 @@ class MessageExtractor:
         return message, attachments
 
     @staticmethod
+    def extract_personality(messages: List[Dict[str, Any]]) -> str:
+        """
+        提取 system/developer 提示词，作为上游 customPersonality。
+
+        约定：
+        - 将所有 system/developer 文本按出现顺序拼接
+        - 仅支持文本（字符串内容，或 content=list 且 item.type=text）
+        """
+        parts: List[str] = []
+        for msg in messages or []:
+            role = str((msg or {}).get("role", "") or "").strip().lower()
+            if role not in ("system", "developer"):
+                continue
+
+            content = (msg or {}).get("content", "")
+            text = MessageExtractor._coerce_text(content)
+            if text:
+                parts.append(text)
+
+        return "\n\n".join(parts).strip()
+
+    @staticmethod
     def extract_text_only(messages: List[Dict[str, Any]]) -> str:
         """仅提取文本内容"""
         text, _ = MessageExtractor.extract(messages, is_video=True)
@@ -208,6 +287,7 @@ class ChatRequestBuilder:
         think: bool = None,
         file_attachments: List[str] = None,
         image_attachments: List[str] = None,
+        custom_personality: str | None = None,
     ) -> Dict[str, Any]:
         """
         构造请求体
@@ -223,6 +303,10 @@ class ChatRequestBuilder:
         temporary = get_config("grok.temporary", True)
         if think is None:
             think = get_config("grok.thinking", False)
+        if custom_personality is None:
+            custom_personality = str(
+                get_config("grok.custom_personality_default", "") or ""
+            )
 
         merged_attachments: List[str] = []
         if file_attachments:
@@ -234,6 +318,8 @@ class ChatRequestBuilder:
             "temporary": temporary,
             "modelName": model,
             "message": message,
+            # 必填字段：上游要求必须传 customPersonality（即使为空字符串也需显式携带）
+            "customPersonality": custom_personality,
             "fileAttachments": merged_attachments,
             "imageAttachments": [],
             "disableSearch": False,
@@ -291,6 +377,7 @@ class GrokChatService:
         stream: bool = None,
         file_attachments: List[str] = None,
         image_attachments: List[str] = None,
+        custom_personality: str | None = None,
     ):
         """
         发送聊天请求
@@ -313,7 +400,13 @@ class GrokChatService:
 
         headers = ChatRequestBuilder.build_headers(token)
         payload = ChatRequestBuilder.build_payload(
-            message, model, mode, think, file_attachments, image_attachments
+            message,
+            model,
+            mode,
+            think,
+            file_attachments,
+            image_attachments,
+            custom_personality=custom_personality,
         )
         proxies = {"http": self.proxy, "https": self.proxy} if self.proxy else None
         timeout = get_config("grok.timeout", TIMEOUT)
@@ -450,10 +543,31 @@ class GrokChatService:
         mode = model_info.model_mode
         is_video = model_info.is_video
 
-        # 提取消息和附件
+        # 提取提示词：显式字段 + messages 内的 system/developer（去重后合并）
+        personality_from_messages = MessageExtractor.extract_personality(request.messages)
+        personality_from_field = str(request.custom_personality or "").strip()
+
+        parts: List[str] = []
+        if personality_from_field:
+            parts.append(personality_from_field)
+        if personality_from_messages and personality_from_messages not in parts:
+            parts.append(personality_from_messages)
+
+        custom_personality = ("\n\n".join(parts)).strip() or None
+        if custom_personality:
+            preview = custom_personality.replace("\n", "\\n")
+            logger.debug(
+                f"Resolved customPersonality: len={len(custom_personality)} preview={preview[:160]}"
+            )
+        else:
+            logger.debug("Resolved customPersonality: <empty>")
+
+        # 提取消息和附件（system/developer 已转为 customPersonality，不再拼进 message，避免重复）
         try:
             message, attachments = MessageExtractor.extract(
-                request.messages, is_video=is_video
+                request.messages,
+                is_video=is_video,
+                exclude_roles={"system", "developer"},
             )
         except ValueError as e:
             raise ValidationException(str(e))
@@ -497,6 +611,7 @@ class GrokChatService:
             stream,
             file_attachments=file_ids,
             image_attachments=[],
+            custom_personality=custom_personality,
         )
 
         return response, stream, request.model
@@ -547,6 +662,7 @@ class ChatService:
         messages: List[Dict[str, Any]],
         stream: bool = None,
         thinking: str = None,
+        custom_personality: str | None = None,
     ):
         """
         Chat Completions 入口
@@ -596,7 +712,11 @@ class ChatService:
 
         # 构造请求
         chat_request = ChatRequest(
-            model=model, messages=messages, stream=is_stream, think=think
+            model=model,
+            messages=messages,
+            stream=is_stream,
+            think=think,
+            custom_personality=custom_personality,
         )
 
         # 请求 Grok

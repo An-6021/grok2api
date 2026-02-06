@@ -2,6 +2,8 @@
 temporary = true
 stream = true
 thinking = true
+# 上游 REST chat 必填字段 customPersonality；为空时使用该默认值
+custom_personality_default = ""
 dynamic_statsig = true
 filter_tags = ["xaiartifact","xai:tool_usage_card","grok:render"]
 timeout = 120
