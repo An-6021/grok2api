@@ -42,17 +42,48 @@ class MessageExtractor:
     """消息内容提取器"""
 
     @staticmethod
+    def _extract_text(content) -> str:
+        """从消息 content 中提取纯文本，兼容 str 和 list 格式"""
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, str):
+                    if item.strip():
+                        parts.append(item.strip())
+                elif isinstance(item, dict):
+                    item_type = item.get("type", "")
+                    if item_type == "text":
+                        if text := item.get("text", "").strip():
+                            parts.append(text)
+                    elif not item_type and "text" in item:
+                        if text := item.get("text", "").strip():
+                            parts.append(text)
+            return "\n".join(parts)
+        return str(content).strip() if content else ""
+
+    @staticmethod
     def extract(
         messages: List[Dict[str, Any]], is_video: bool = False
-    ) -> tuple[str, List[tuple[str, str]]]:
-        """从 OpenAI 消息格式提取内容，返回 (text, attachments)"""
+    ) -> tuple[str, List[tuple[str, str]], str]:
+        """从 OpenAI 消息格式提取内容，返回 (text, attachments, system_prompt)"""
         texts = []
         attachments = []
         extracted = []
+        system_parts = []
 
         for msg in messages:
             role = msg.get("role", "")
             content = msg.get("content", "")
+
+            # system/developer 消息提取为 customPersonality
+            if role in ("system", "developer"):
+                text = MessageExtractor._extract_text(content)
+                if text:
+                    system_parts.append(text)
+                continue
+
             parts = []
 
             if isinstance(content, str):
@@ -116,7 +147,8 @@ class MessageExtractor:
             text = item["text"]
             texts.append(text if i == last_user_index else f"{role}: {text}")
 
-        return "\n\n".join(texts), attachments
+        system_prompt = "\n\n".join(system_parts)
+        return "\n\n".join(texts), attachments, system_prompt
 
 
 class ChatRequestBuilder:
@@ -161,6 +193,7 @@ class ChatRequestBuilder:
         mode: str = None,
         file_attachments: List[str] = None,
         image_attachments: List[str] = None,
+        custom_personality: str = None,
     ) -> Dict[str, Any]:
         """构造请求体"""
         merged_attachments = []
@@ -202,6 +235,9 @@ class ChatRequestBuilder:
         if mode:
             payload["modelMode"] = mode
 
+        if custom_personality:
+            payload["customPersonality"] = custom_personality
+
         return payload
 
 
@@ -221,6 +257,7 @@ class GrokChatService:
         file_attachments: List[str] = None,
         image_attachments: List[str] = None,
         raw_payload: Dict[str, Any] = None,
+        custom_personality: str = None,
     ):
         """发送聊天请求"""
         if stream is None:
@@ -231,7 +268,8 @@ class GrokChatService:
             raw_payload
             if raw_payload is not None
             else ChatRequestBuilder.build_payload(
-                message, model, mode, file_attachments, image_attachments
+                message, model, mode, file_attachments, image_attachments,
+                custom_personality=custom_personality,
             )
         )
         proxies = {"http": self.proxy, "https": self.proxy} if self.proxy else None
@@ -332,11 +370,12 @@ class GrokChatService:
 
         # 提取消息和附件
         try:
-            message, attachments = MessageExtractor.extract(
+            message, attachments, system_prompt = MessageExtractor.extract(
                 request.messages, is_video=is_video
             )
             logger.debug(
-                f"Extracted message length={len(message)}, attachments={len(attachments)}"
+                f"Extracted message length={len(message)}, attachments={len(attachments)}, "
+                f"system_prompt={'yes' if system_prompt else 'no'}"
             )
         except ValueError as e:
             raise ValidationException(str(e))
@@ -367,6 +406,7 @@ class GrokChatService:
             stream,
             file_attachments=file_ids,
             image_attachments=[],
+            custom_personality=system_prompt or None,
         )
 
         return response, stream, request.model

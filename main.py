@@ -4,7 +4,7 @@ Grok2API 应用入口
 FastAPI 应用初始化和路由注册
 """
 
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, AsyncExitStack
 import os
 import platform
 import sys
@@ -64,11 +64,20 @@ async def lifespan(app: FastAPI):
         scheduler = get_scheduler(interval)
         scheduler.start()
 
+    # 5. 启动 MCP session manager
+    stack = AsyncExitStack()
+    mcp_enabled = get_config("mcp.enabled", True)
+    if mcp_enabled and hasattr(app.state, "mcp_server") and app.state.mcp_server:
+        await stack.enter_async_context(app.state.mcp_server.session_manager.run())
+        logger.info("MCP server started at /mcp")
+
     logger.info("Application startup complete.")
     yield
 
     # 关闭
     logger.info("Shutting down Grok2API...")
+
+    await stack.aclose()
 
     from app.core.storage import StorageFactory
 
@@ -120,6 +129,16 @@ def create_app() -> FastAPI:
     static_dir = Path(__file__).parent / "app" / "static"
     if static_dir.exists():
         app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
+    # MCP 服务
+    from starlette.routing import Mount as StarletteMount
+    from app.services.mcp import create_mcp_server
+
+    mcp_server = create_mcp_server()
+    app.state.mcp_server = mcp_server
+    app.routes.append(
+        StarletteMount("/mcp", app=mcp_server.streamable_http_app())
+    )
 
     # 注册管理路由
     from app.api.v1.admin import router as admin_router

@@ -1,7 +1,7 @@
 [app]
 app_url = "http://127.0.0.1:8000"
 app_key = "grok2api"
-api_key = ""
+api_key = "123"
 image_format = "url"
 video_format = "html"
 
@@ -27,13 +27,13 @@ filter_tags = ["xaiartifact","xai:tool_usage_card","grok:render"]
 max_retry = 3
 retry_status_codes = [401,429,403]
 retry_backoff_base = 0.5
-retry_backoff_factor = 2.0
-retry_backoff_max = 30.0
-retry_budget = 90.0
+retry_backoff_factor = 2
+retry_backoff_max = 30
+retry_budget = 90
 
 [timeout]
-stream_idle_timeout = 120.0
-video_idle_timeout = 90.0
+stream_idle_timeout = 120
+video_idle_timeout = 90
 
 [image]
 image_ws = true
@@ -66,3 +66,7 @@ usage_max_tokens = 1000
 nsfw_max_concurrent = 10
 nsfw_batch_size = 50
 nsfw_max_tokens = 1000
+
+[mcp]
+enabled = true
+model = "grok-4.1-thinking"

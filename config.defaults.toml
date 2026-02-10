@@ -138,3 +138,11 @@ nsfw_batch_size = 50
 # NSFW 单次最大数量
 nsfw_max_tokens = 1000
 
+
+# ==================== MCP Server ====================
+[mcp]
+# 是否启用 MCP 搜索服务
+enabled = true
+# MCP 搜索使用的模型
+model = "grok-3"
+

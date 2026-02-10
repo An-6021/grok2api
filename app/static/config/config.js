@@ -98,6 +98,11 @@ const LOCALE_MAP = {
     "enable_auto_clean": { title: "自动清理", desc: "是否启用缓存自动清理，开启后按上限自动回收。" },
     "limit_mb": { title: "清理阈值", desc: "缓存大小阈值（MB），超过阈值会触发清理。" }
   },
+  "mcp": {
+    "label": "MCP 搜索服务",
+    "enabled": { title: "启用 MCP", desc: "启用后可在 /mcp 端点提供 MCP 搜索服务，供 Claude 等客户端调用。" },
+    "model": { title: "搜索模型", desc: "MCP 搜索使用的 Grok 模型。" }
+  },
   "performance": {
     "label": "并发性能",
     "media_max_concurrent": { title: "Media 并发上限", desc: "视频/媒体生成请求的并发上限。推荐 50。" },
@@ -118,6 +123,77 @@ const LOCALE_MAP = {
 const SECTION_DESCRIPTIONS = {
   "security": "配置不正确将导致 403 错误。服务首次请求 Grok 时的 IP 必须与获取 CF Clearance 时的 IP 一致，后续服务器请求 IP 变化不会导致 403。"
 };
+
+// MCP 连接 JSON 配置块（在 MCP section 渲染后动态插入）
+function buildMcpJsonBlock(appUrl) {
+  const baseUrl = (appUrl || window.location.origin).replace(/\/+$/, '');
+  const mcpUrl = `${baseUrl}/mcp`;
+
+  // Claude Desktop 配置（需要 mcp-remote 桥接）
+  const desktopConfig = {
+    mcpServers: {
+      "grok-search": {
+        command: "npx",
+        args: ["-y", "mcp-remote", mcpUrl]
+      }
+    }
+  };
+
+  const wrapper = document.createElement('div');
+  wrapper.className = 'config-field';
+  wrapper.style.gridColumn = '1 / -1';
+
+  // --- Claude Desktop ---
+  const desktopTitle = document.createElement('div');
+  desktopTitle.className = 'config-field-title';
+  desktopTitle.textContent = 'JSON 配置';
+  wrapper.appendChild(desktopTitle);
+
+  const desktopDesc = document.createElement('p');
+  desktopDesc.className = 'config-field-desc';
+  desktopDesc.textContent = '需要已安装 Node.js（npx mcp-remote 桥接）。';
+  wrapper.appendChild(desktopDesc);
+
+  const desktopInput = document.createElement('div');
+  desktopInput.className = 'config-field-input';
+
+  const desktopArea = document.createElement('textarea');
+  desktopArea.className = 'geist-input font-mono text-xs';
+  desktopArea.rows = 8;
+  desktopArea.readOnly = true;
+  desktopArea.value = JSON.stringify(desktopConfig, null, 2);
+  desktopArea.style.cursor = 'default';
+  desktopArea.style.backgroundColor = 'var(--accents-1)';
+
+  const desktopCopyRow = document.createElement('div');
+  desktopCopyRow.className = 'flex justify-end mt-2';
+  const desktopCopyBtn = buildCopyButton(desktopArea);
+  desktopCopyRow.appendChild(desktopCopyBtn);
+
+  desktopInput.appendChild(desktopArea);
+  desktopInput.appendChild(desktopCopyRow);
+  wrapper.appendChild(desktopInput);
+
+  return wrapper;
+}
+
+function buildCopyButton(textarea) {
+  const copyBtn = document.createElement('button');
+  copyBtn.className = 'flex items-center gap-1 px-3 h-[32px] bg-black text-white text-xs rounded-md hover:opacity-80 transition-opacity';
+  copyBtn.type = 'button';
+  const copyIcon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`;
+  copyBtn.innerHTML = `${copyIcon}<span>复制</span>`;
+  copyBtn.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(textarea.value);
+      const origHTML = copyBtn.innerHTML;
+      copyBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg><span>已复制</span>`;
+      copyBtn.style.backgroundColor = '#10b981';
+      setTimeout(() => { copyBtn.innerHTML = origHTML; copyBtn.style.backgroundColor = ''; }, 2000);
+    } catch (err) { console.error('Copy failed', err); }
+  };
+  return copyBtn;
+}
 
 const SECTION_ORDER = new Map(Object.keys(LOCALE_MAP).map((key, index) => [key, index]));
 
@@ -294,6 +370,11 @@ function renderConfig(data) {
 
       card.appendChild(grid);
       if (grid.children.length > 0) {
+        // MCP section: 追加客户端 JSON 配置块
+        if (section === 'mcp') {
+          const appUrl = (data.app && data.app.app_url) || '';
+          grid.appendChild(buildMcpJsonBlock(appUrl));
+        }
         fragment.appendChild(card);
       }
     }

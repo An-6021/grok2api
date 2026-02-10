@@ -75,6 +75,10 @@ GROK_DEFAULTS = {
         "nsfw_batch_size": 50,
         "nsfw_max_tokens": 1000,
     },
+    "mcp": {
+        "enabled": True,
+        "model": "grok-3",
+    },
 }
 
 
