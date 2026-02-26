@@ -12,6 +12,7 @@ from app.core.exceptions import UpstreamException
 from app.services.token.service import TokenService
 from app.services.reverse.utils.headers import build_headers
 from app.services.reverse.utils.retry import retry_on_status
+from app.services.reverse.set_birth import SetBirthReverse
 
 CHAT_API = "https://grok.com/rest/app-chat/conversations/new"
 
@@ -133,8 +134,10 @@ class AppChatReverse:
                 float(get_config("image.timeout") or 0),
             )
             browser = get_config("proxy.browser")
+            age_verify_attempted = False
 
             async def _do_request():
+                nonlocal age_verify_attempted
                 response = await session.post(
                     CHAT_API,
                     headers=headers,
@@ -158,13 +161,43 @@ class AppChatReverse:
                         "AppChatReverse: Chat failed response body: %s",
                         content,
                     )
+                    if response.status_code == 403 and not age_verify_attempted:
+                        age_verify_attempted = True
+                        try:
+                            await SetBirthReverse.request(session, token)
+                        except Exception as e:
+                            logger.warning(
+                                f"AppChatReverse: age verify attempt failed: {str(e)[:120]}"
+                            )
+                        else:
+                            # Try exactly one more time after birth-date verification.
+                            retry_response = await session.post(
+                                CHAT_API,
+                                headers=headers,
+                                data=orjson.dumps(payload),
+                                timeout=timeout,
+                                stream=True,
+                                proxies=proxies,
+                                impersonate=browser,
+                            )
+                            if retry_response.status_code == 200:
+                                return retry_response
+                            try:
+                                content = await retry_response.text()
+                            except Exception:
+                                pass
+                            response = retry_response
                     logger.error(
                         f"AppChatReverse: Chat failed, {response.status_code}",
                         extra={"error_type": "UpstreamException"},
                     )
                     raise UpstreamException(
                         message=f"AppChatReverse: Chat failed, {response.status_code}",
-                        details={"status": response.status_code, "body": content},
+                        details={
+                            "status": response.status_code,
+                            "body": content,
+                            "age_verify_attempted": age_verify_attempted,
+                        },
                     )
 
                 return response
@@ -175,7 +208,7 @@ class AppChatReverse:
                         status = e.details["status"]
                     else:
                         status = getattr(e, "status_code", None)
-                    if status == 429:
+                    if status in (429, 403):
                         return None
                     return status
                 return None

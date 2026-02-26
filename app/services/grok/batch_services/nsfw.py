@@ -40,6 +40,7 @@ class NSFWService:
     ) -> Dict[str, Dict[str, Any]]:
         """Batch enable NSFW."""
         batch_size = get_config("nsfw.batch_size")
+        apply_delay_ms = max(0, int(get_config("nsfw.apply_delay_ms", 0) or 0))
         async def _enable(token: str):
             try:
                 browser = get_config("proxy.browser")
@@ -89,6 +90,8 @@ class NSFWService:
                         }
                     if success:
                         await mgr.add_tag(token, "nsfw")
+                        if apply_delay_ms > 0:
+                            await asyncio.sleep(apply_delay_ms / 1000)
                     return {
                         "success": success,
                         "http_status": 200,

@@ -1,9 +1,13 @@
 import unittest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 try:
     from app.services.grok.services.chat import MessageExtractor
+    from app.services.grok.services.chat import GrokChatService
 except ModuleNotFoundError:
     MessageExtractor = None
+    GrokChatService = None
 
 try:
     from app.services.reverse.app_chat import AppChatReverse
@@ -57,6 +61,44 @@ class TestCustomPersonality(unittest.TestCase):
         )
         self.assertEqual(payload.get("customPersonality"), "SYS")
 
+
+@unittest.skipIf(GrokChatService is None, "runtime deps not installed")
+class TestCustomPersonalityDefault(unittest.IsolatedAsyncioTestCase):
+    async def test_default_personality_used_when_missing(self):
+        service = GrokChatService()
+
+        with patch(
+            "app.services.grok.services.chat.ModelService.get",
+            return_value=SimpleNamespace(
+                grok_model="grok-3",
+                model_mode="MODEL_MODE_GROK_3",
+            ),
+        ), patch(
+            "app.services.grok.services.chat.MessageExtractor.extract_personality",
+            return_value="",
+        ), patch(
+            "app.services.grok.services.chat.MessageExtractor.extract",
+            return_value=("hello", [], []),
+        ), patch(
+            "app.services.grok.services.chat.get_config",
+            side_effect=lambda key, default=None: (
+                "DEFAULT_PERSONA"
+                if key == "app.custom_personality_default"
+                else (False if key == "app.stream" else default)
+            ),
+        ), patch.object(
+            service,
+            "chat",
+            AsyncMock(return_value="OK"),
+        ) as chat_mock:
+            await service.chat_openai(
+                token="t",
+                model="grok-3",
+                messages=[{"role": "user", "content": "hi"}],
+                stream=False,
+            )
+
+        self.assertEqual(chat_mock.await_args.kwargs.get("custom_personality"), "DEFAULT_PERSONA")
 
 if __name__ == "__main__":
     unittest.main()

@@ -48,7 +48,10 @@ class NsfwMgmtReverse:
             headers["Pragma"] = "no-cache"
 
             # Build payload
-            name = "always_show_nsfw_content".encode("utf-8")
+            feature_key = str(
+                get_config("nsfw.feature_key", "always_show_nsfw_content")
+            ).strip() or "always_show_nsfw_content"
+            name = feature_key.encode("utf-8")
             inner = b"\x0a" + bytes([len(name)]) + name
             protobuf = b"\x0a\x02\x10\x01\x12" + bytes([len(inner)]) + inner
             payload = GrpcClient.encode_payload(protobuf)

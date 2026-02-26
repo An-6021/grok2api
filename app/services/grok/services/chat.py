@@ -384,6 +384,11 @@ class GrokChatService:
         if personality_from_messages and personality_from_messages not in parts:
             parts.append(personality_from_messages)
         resolved_custom_personality = ("\n\n".join(parts)).strip() or None
+        if resolved_custom_personality is None:
+            default_personality = str(
+                get_config("app.custom_personality_default", "") or ""
+            ).strip()
+            resolved_custom_personality = default_personality or None
 
         # 提取消息和附件
         message, file_attachments, image_attachments = MessageExtractor.extract(
