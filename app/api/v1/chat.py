@@ -10,7 +10,7 @@ import uuid
 
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse, JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field, field_validator
 
 from app.services.grok.services.chat import ChatService
 from app.services.grok.services.image import ImageGenerationService
@@ -59,6 +59,23 @@ class ChatCompletionRequest(BaseModel):
     reasoning_effort: Optional[str] = Field(None, description="推理强度: none/minimal/low/medium/high/xhigh")
     temperature: Optional[float] = Field(0.8, description="采样温度: 0-2")
     top_p: Optional[float] = Field(0.95, description="nucleus 采样: 0-1")
+    custom_personality: Optional[str] = Field(
+        None, description="自定义提示词", alias="customPersonality"
+    )
+    system_prompt: Optional[str] = Field(
+        None,
+        description="系统提示词/指令",
+        validation_alias=AliasChoices(
+            "system",
+            "system_prompt",
+            "systemPrompt",
+            "instructions",
+            "custom_instructions",
+            "customInstructions",
+            "persona",
+            "personality",
+        ),
+    )
     # 视频生成配置
     video_config: Optional[VideoConfig] = Field(None, description="视频生成参数")
     # 图片生成配置
@@ -67,6 +84,113 @@ class ChatCompletionRequest(BaseModel):
     tools: Optional[List[Dict[str, Any]]] = Field(None, description="Tool definitions")
     tool_choice: Optional[Union[str, Dict[str, Any]]] = Field(None, description="Tool choice: auto/required/none/specific")
     parallel_tool_calls: Optional[bool] = Field(True, description="Allow parallel tool calls")
+
+    @field_validator("stream", mode="before")
+    @classmethod
+    def validate_stream(cls, value):
+        if value is None or isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in ("", "undefined", "[undefined]", "null", "none"):
+                return None
+            if normalized in ("true", "1", "yes"):
+                return True
+            if normalized in ("false", "0", "no"):
+                return False
+            raise ValueError("stream must be a boolean")
+        raise ValueError("stream must be a boolean")
+
+    model_config = {"extra": "allow", "populate_by_name": True}
+
+
+def _resolve_custom_personality(request: ChatCompletionRequest) -> str | None:
+    """Resolve compatible system prompt fields into upstream customPersonality."""
+
+    def _extract_text(value: Any, depth: int = 0) -> str:
+        if depth > 4 or value is None:
+            return ""
+        if isinstance(value, str):
+            text = value.strip()
+            if text.lower() in ("", "undefined", "[undefined]", "null", "none"):
+                return ""
+            return text
+        if isinstance(value, list):
+            parts: List[str] = []
+            for item in value:
+                text = _extract_text(item, depth + 1)
+                if text:
+                    parts.append(text)
+            return "\n".join(parts).strip()
+        if isinstance(value, dict):
+            if value.get("enabled") is False:
+                return ""
+            item_type = str(value.get("type", "")).strip().lower()
+            if item_type in ("text", "input_text"):
+                text = _extract_text(value.get("text"), depth + 1)
+                if text:
+                    return text
+            for key in (
+                "text",
+                "content",
+                "prompt",
+                "message",
+                "instruction",
+                "instructions",
+                "system",
+                "system_prompt",
+                "systemPrompt",
+                "value",
+            ):
+                if key not in value:
+                    continue
+                text = _extract_text(value.get(key), depth + 1)
+                if text:
+                    return text
+        return ""
+
+    text = _extract_text(request.custom_personality)
+    if text:
+        return text
+
+    text = _extract_text(request.system_prompt)
+    if text:
+        return text
+
+    extra = getattr(request, "model_extra", None) or {}
+    for key in (
+        "customPersonality",
+        "systemPrompt",
+        "system_message",
+        "systemMessage",
+        "system_prompt",
+        "system",
+        "instructions",
+        "custom_instructions",
+        "customInstructions",
+        "persona",
+        "personality",
+    ):
+        if key not in extra:
+            continue
+        text = _extract_text(extra.get(key))
+        if text:
+            return text
+
+    for key, value in extra.items():
+        key_l = str(key).lower()
+        if key_l == "system_fingerprint":
+            continue
+        if not any(
+            token in key_l
+            for token in ("system", "instruction", "persona", "personality")
+        ):
+            continue
+        text = _extract_text(value)
+        if text:
+            return text
+
+    return None
 
 
 VALID_ROLES = {"developer", "system", "user", "assistant", "tool"}
@@ -247,41 +371,16 @@ def validate_request(request: ChatCompletionRequest):
                     code="empty_content",
                 )
 
-        # 列表内容
-        elif isinstance(content, dict):
-            content = [content]
-            for c_idx, item in enumerate(content):
-                if not isinstance(item, dict):
-                    raise ValidationException(
-                        message="Message content items must be objects",
-                        param=f"messages.{idx}.content.{c_idx}",
-                        code="invalid_content_item",
-                    )
-                item_type = item.get("type")
-                if item_type != "text":
-                    raise ValidationException(
-                        message="When content is an object, type must be 'text'",
-                        param=f"messages.{idx}.content.{c_idx}.type",
-                        code="invalid_content_type",
-                    )
-                text = item.get("text", "")
-                if not isinstance(text, str) or not text.strip():
-                    raise ValidationException(
-                        message="messages.%d.content.%d.text must be a non-empty string"
-                        % (idx, c_idx),
-                        param=f"messages.{idx}.content.{c_idx}.text",
-                        code="empty_content",
-                    )
-
-        elif isinstance(content, list):
-            if not content:
+        elif isinstance(content, (dict, list)):
+            blocks = [content] if isinstance(content, dict) else content
+            if not blocks:
                 raise ValidationException(
                     message="Message content cannot be an empty array",
                     param=f"messages.{idx}.content",
                     code="empty_content",
                 )
 
-            for block_idx, block in enumerate(content):
+            for block_idx, block in enumerate(blocks):
                 # 检查空对象
                 if not isinstance(block, dict):
                     raise ValidationException(
@@ -317,6 +416,10 @@ def validate_request(request: ChatCompletionRequest):
                         param=f"messages.{idx}.content.{block_idx}.type",
                         code="empty_type",
                     )
+
+                block_type = block_type.strip().lower()
+                if block_type == "input_text":
+                    block_type = "text"
 
                 # 验证 type 有效性
                 if msg.role == "user":
@@ -390,7 +493,7 @@ def validate_request(request: ChatCompletionRequest):
             )
         else:
             raise ValidationException(
-                message="Message content must be a string or array",
+                message="Message content must be a string, object or array",
                 param=f"messages.{idx}.content",
                 code="invalid_content",
             )
@@ -400,9 +503,12 @@ def validate_request(request: ChatCompletionRequest):
         if isinstance(request.stream, bool):
             pass
         elif isinstance(request.stream, str):
-            if request.stream.lower() in ("true", "1", "yes"):
+            normalized = request.stream.strip().lower()
+            if normalized in ("", "undefined", "[undefined]", "null", "none"):
+                request.stream = None
+            elif normalized in ("true", "1", "yes"):
                 request.stream = True
-            elif request.stream.lower() in ("false", "0", "no"):
+            elif normalized in ("false", "0", "no"):
                 request.stream = False
             else:
                 raise ValidationException(
@@ -765,6 +871,7 @@ async def chat_completions(request: ChatCompletionRequest):
             reasoning_effort=request.reasoning_effort,
             temperature=request.temperature,
             top_p=request.top_p,
+            custom_personality=_resolve_custom_personality(request),
             tools=request.tools,
             tool_choice=request.tool_choice,
             parallel_tool_calls=request.parallel_tool_calls,

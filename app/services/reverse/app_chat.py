@@ -27,6 +27,7 @@ class AppChatReverse:
         file_attachments: List[str] = None,
         tool_overrides: Dict[str, Any] = None,
         model_config_override: Dict[str, Any] = None,
+        custom_personality: str | None = None,
     ) -> Dict[str, Any]:
         """Build chat payload for Grok app-chat API."""
 
@@ -48,6 +49,7 @@ class AppChatReverse:
             "enableImageGeneration": True,
             "enableImageStreaming": True,
             "enableSideBySide": True,
+            "customPersonality": custom_personality or "",
             "fileAttachments": attachments,
             "forceConcise": False,
             "forceSideBySide": False,
@@ -83,6 +85,7 @@ class AppChatReverse:
         file_attachments: List[str] = None,
         tool_overrides: Dict[str, Any] = None,
         model_config_override: Dict[str, Any] = None,
+        custom_personality: str | None = None,
     ) -> Any:
         """Send app chat request to Grok.
         
@@ -120,6 +123,7 @@ class AppChatReverse:
                 file_attachments=file_attachments,
                 tool_overrides=tool_overrides,
                 model_config_override=model_config_override,
+                custom_personality=custom_personality,
             )
 
             # Curl Config

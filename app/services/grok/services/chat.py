@@ -110,11 +110,45 @@ class MessageExtractor:
     """消息内容提取器"""
 
     @staticmethod
+    def _coerce_text(value: Any, depth: int = 0) -> str:
+        """Normalize nested text-ish structures into plain text."""
+        if depth > 4 or value is None:
+            return ""
+        if isinstance(value, str):
+            text = value.strip()
+            if text.lower() in ("", "undefined", "[undefined]", "null", "none"):
+                return ""
+            return text
+        if isinstance(value, list):
+            parts: List[str] = []
+            for item in value:
+                text = MessageExtractor._coerce_text(item, depth + 1)
+                if text:
+                    parts.append(text)
+            return "\n".join(parts).strip()
+        if isinstance(value, dict):
+            if value.get("enabled") is False:
+                return ""
+            item_type = str(value.get("type", "")).strip().lower()
+            if item_type in ("text", "input_text"):
+                text = MessageExtractor._coerce_text(value.get("text"), depth + 1)
+                if text:
+                    return text
+            for key in ("text", "content", "value", "prompt", "message"):
+                if key not in value:
+                    continue
+                text = MessageExtractor._coerce_text(value.get(key), depth + 1)
+                if text:
+                    return text
+        return ""
+
+    @staticmethod
     def extract(
         messages: List[Dict[str, Any]],
         tools: List[Dict[str, Any]] = None,
         tool_choice: Any = None,
         parallel_tool_calls: bool = True,
+        exclude_roles: set[str] | None = None,
     ) -> tuple[str, List[str], List[str]]:
         """从 OpenAI 消息格式提取内容，返回 (text, file_attachments, image_attachments)"""
         # Pre-process: convert tool-related messages to text format
@@ -125,64 +159,64 @@ class MessageExtractor:
         file_attachments: List[str] = []
         image_attachments: List[str] = []
         extracted = []
+        exclude_roles = {str(r or "").strip().lower() for r in (exclude_roles or set())}
 
         for msg in messages:
-            role = msg.get("role", "") or "user"
+            role = str((msg or {}).get("role", "") or "user").strip().lower()
+            if role in exclude_roles:
+                continue
             content = msg.get("content", "")
             parts = []
 
             if isinstance(content, str):
-                if content.strip():
-                    parts.append(content)
-            elif isinstance(content, dict):
-                content = [content]
-                for item in content:
+                text = MessageExtractor._coerce_text(content)
+                if text:
+                    parts.append(text)
+            elif isinstance(content, (dict, list)):
+                items = [content] if isinstance(content, dict) else content
+                for item in items:
                     if not isinstance(item, dict):
-                        continue
-                    item_type = item.get("type", "")
-                    if item_type == "text":
-                        if text := item.get("text", "").strip():
+                        text = MessageExtractor._coerce_text(item)
+                        if text:
                             parts.append(text)
-                    elif item_type == "image_url":
-                        image_data = item.get("image_url", {})
-                        url = image_data.get("url", "")
-                        if url:
-                            image_attachments.append(url)
-                    elif item_type == "input_audio":
-                        audio_data = item.get("input_audio", {})
-                        data = audio_data.get("data", "")
-                        if data:
-                            file_attachments.append(data)
-                    elif item_type == "file":
-                        file_data = item.get("file", {})
-                        raw = file_data.get("file_data", "")
-                        if raw:
-                            file_attachments.append(raw)
-            elif isinstance(content, list):
-                for item in content:
-                    if not isinstance(item, dict):
                         continue
-                    item_type = item.get("type", "")
 
-                    if item_type == "text":
-                        if text := item.get("text", "").strip():
+                    item_type = str(item.get("type", "")).strip().lower()
+
+                    if item_type in ("text", "input_text") or (
+                        not item_type and "text" in item
+                    ):
+                        text = MessageExtractor._coerce_text(item.get("text"))
+                        if text:
                             parts.append(text)
 
                     elif item_type == "image_url":
                         image_data = item.get("image_url", {})
-                        url = image_data.get("url", "")
+                        url = (
+                            image_data.get("url", "")
+                            if isinstance(image_data, dict)
+                            else str(image_data)
+                        )
                         if url:
                             image_attachments.append(url)
 
                     elif item_type == "input_audio":
                         audio_data = item.get("input_audio", {})
-                        data = audio_data.get("data", "")
+                        data = (
+                            audio_data.get("data", "")
+                            if isinstance(audio_data, dict)
+                            else str(audio_data)
+                        )
                         if data:
                             file_attachments.append(data)
 
                     elif item_type == "file":
                         file_data = item.get("file", {})
-                        raw = file_data.get("file_data", "")
+                        raw = ""
+                        if isinstance(file_data, dict):
+                            raw = file_data.get("file_data", "")
+                        elif isinstance(file_data, str):
+                            raw = file_data
                         if raw:
                             file_attachments.append(raw)
 
@@ -249,6 +283,19 @@ class MessageExtractor:
 
         return combined, file_attachments, image_attachments
 
+    @staticmethod
+    def extract_personality(messages: List[Dict[str, Any]]) -> str:
+        """Extract system/developer prompts to upstream customPersonality."""
+        parts: List[str] = []
+        for msg in messages or []:
+            role = str((msg or {}).get("role", "") or "").strip().lower()
+            if role not in ("system", "developer"):
+                continue
+            text = MessageExtractor._coerce_text((msg or {}).get("content", ""))
+            if text:
+                parts.append(text)
+        return "\n\n".join(parts).strip()
+
 
 class GrokChatService:
     """Grok API 调用服务"""
@@ -263,6 +310,7 @@ class GrokChatService:
         file_attachments: List[str] = None,
         tool_overrides: Dict[str, Any] = None,
         model_config_override: Dict[str, Any] = None,
+        custom_personality: str | None = None,
     ):
         """发送聊天请求"""
         if stream is None:
@@ -286,6 +334,7 @@ class GrokChatService:
                 file_attachments=file_attachments,
                 tool_overrides=tool_overrides,
                 model_config_override=model_config_override,
+                custom_personality=custom_personality,
             )
             logger.info(f"Chat connected: model={model}, stream={stream}")
         except Exception:
@@ -317,6 +366,7 @@ class GrokChatService:
         tools: List[Dict[str, Any]] = None,
         tool_choice: Any = None,
         parallel_tool_calls: bool = True,
+        custom_personality: str | None = None,
     ):
         """OpenAI 兼容接口"""
         model_info = ModelService.get(model)
@@ -325,9 +375,23 @@ class GrokChatService:
 
         grok_model = model_info.grok_model
         mode = model_info.model_mode
+
+        personality_from_messages = MessageExtractor.extract_personality(messages)
+        personality_from_field = str(custom_personality or "").strip()
+        parts: List[str] = []
+        if personality_from_field:
+            parts.append(personality_from_field)
+        if personality_from_messages and personality_from_messages not in parts:
+            parts.append(personality_from_messages)
+        resolved_custom_personality = ("\n\n".join(parts)).strip() or None
+
         # 提取消息和附件
         message, file_attachments, image_attachments = MessageExtractor.extract(
-            messages, tools=tools, tool_choice=tool_choice, parallel_tool_calls=parallel_tool_calls
+            messages,
+            tools=tools,
+            tool_choice=tool_choice,
+            parallel_tool_calls=parallel_tool_calls,
+            exclude_roles={"system", "developer"},
         )
         logger.debug(
             "Extracted message length=%s, files=%s, images=%s",
@@ -377,6 +441,7 @@ class GrokChatService:
             file_attachments=all_attachments,
             tool_overrides=tool_overrides_payload,
             model_config_override=model_config_override,
+            custom_personality=resolved_custom_personality,
         )
 
         return response, stream, model
@@ -396,6 +461,7 @@ class ChatService:
         tools: List[Dict[str, Any]] = None,
         tool_choice: Any = None,
         parallel_tool_calls: bool = True,
+        custom_personality: str | None = None,
     ):
         """Chat Completions 入口"""
         # 获取 token
@@ -443,6 +509,7 @@ class ChatService:
                     tools=tools,
                     tool_choice=tool_choice,
                     parallel_tool_calls=parallel_tool_calls,
+                    custom_personality=custom_personality,
                 )
 
                 # 处理响应
