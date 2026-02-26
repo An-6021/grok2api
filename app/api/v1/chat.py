@@ -59,10 +59,10 @@ class ChatCompletionRequest(BaseModel):
     reasoning_effort: Optional[str] = Field(None, description="推理强度: none/minimal/low/medium/high/xhigh")
     temperature: Optional[float] = Field(0.8, description="采样温度: 0-2")
     top_p: Optional[float] = Field(0.95, description="nucleus 采样: 0-1")
-    custom_personality: Optional[str] = Field(
+    custom_personality: Optional[Any] = Field(
         None, description="自定义提示词", alias="customPersonality"
     )
-    system_prompt: Optional[str] = Field(
+    system_prompt: Optional[Any] = Field(
         None,
         description="系统提示词/指令",
         validation_alias=AliasChoices(

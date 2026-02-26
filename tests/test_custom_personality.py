@@ -43,6 +43,16 @@ class TestCustomPersonality(unittest.TestCase):
         self.assertEqual(_resolve_custom_personality(req), "SYS")
         self.assertIsNone(req.stream)
 
+    @unittest.skipIf(ChatCompletionRequest is None, "fastapi not installed")
+    def test_resolve_supports_structured_top_level_fields(self):
+        req = ChatCompletionRequest(
+            model="grok-3",
+            messages=[{"role": "user", "content": "hi"}],
+            customPersonality={"type": "text", "text": "A"},
+            systemPrompt=[{"type": "text", "text": "B"}],
+        )
+        self.assertEqual(_resolve_custom_personality(req), "A")
+
     @unittest.skipIf(MessageExtractor is None, "runtime deps not installed")
     def test_extract_personality_supports_structured_content(self):
         messages = [
