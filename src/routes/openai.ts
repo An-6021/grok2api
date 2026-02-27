@@ -1537,13 +1537,17 @@ openAiRoutes.post("/images/generations", async (c) => {
                         error: "",
                       });
                       controller.close();
-                    } catch (e) {
-                      if (!state.wroteAny) {
-                        try {
-                          const chosen = await selectBestToken(c.env.grok2api, requestedModel);
-                          if (!chosen) {
-                            const duration = (Date.now() - startedAt) / 1000;
-                            await addRequestLog(c.env.grok2api, {
+	                    } catch (e) {
+	                      if (!state.wroteAny) {
+	                        console.warn(
+	                          "Experimental image generation stream failed, fallback to legacy:",
+	                          e instanceof Error ? e.message : String(e),
+	                        );
+	                        try {
+	                          const chosen = await selectBestToken(c.env.grok2api, requestedModel);
+	                          if (!chosen) {
+	                            const duration = (Date.now() - startedAt) / 1000;
+	                            await addRequestLog(c.env.grok2api, {
                               ip,
                               model: requestedModel,
                               duration: Number(duration.toFixed(2)),
