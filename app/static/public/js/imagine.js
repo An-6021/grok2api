@@ -25,6 +25,7 @@
 
   let wsConnections = [];
   let sseConnections = [];
+  let openAiControllers = [];
   let imageCount = 0;
   let totalLatency = 0;
   let latencyCount = 0;
@@ -80,6 +81,11 @@
     if (!activeValue) return;
     if (connectionMode === 'sse') {
       const active = sseConnections.filter(es => es && es.readyState === EventSource.OPEN).length;
+      activeValue.textContent = String(active);
+      return;
+    }
+    if (connectionMode === 'openai') {
+      const active = openAiControllers.filter(ctrl => ctrl && !ctrl.signal.aborted).length;
       activeValue.textContent = String(active);
       return;
     }
@@ -227,8 +233,10 @@
       body: JSON.stringify({ prompt, aspect_ratio: ratio, nsfw: nsfwEnabled })
     });
     if (!res.ok) {
-      const text = await res.text();
-      throw new Error(text || 'Failed to create task');
+      const text = await res.text().catch(() => '');
+      const err = new Error(text || `Failed to create task (${res.status})`);
+      err.status = res.status;
+      throw err;
     }
     const data = await res.json();
     return data && data.task_id ? String(data.task_id) : '';
@@ -259,6 +267,132 @@
       });
     } catch (e) {
       // ignore
+    }
+  }
+
+  function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  function extractSseDataLines(block) {
+    const lines = String(block || '').replace(/\r\n/g, '\n').split('\n');
+    const out = [];
+    for (const raw of lines) {
+      const line = raw.trim();
+      if (!line) continue;
+      if (line.startsWith('data:')) {
+        const payload = line.slice(5).trim();
+        if (payload) out.push(payload);
+      }
+    }
+    return out;
+  }
+
+  async function consumeOpenAiImageStream(res) {
+    if (!res || !res.body) {
+      throw new Error('No response body');
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (!value) continue;
+        buffer += decoder.decode(value, { stream: true });
+
+        // SSE frames are separated by blank line.
+        let idx = buffer.indexOf('\n\n');
+        while (idx >= 0) {
+          const block = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 2);
+          const payloads = extractSseDataLines(block);
+          payloads.forEach((payload) => {
+            if (payload === '[DONE]') return;
+            handleMessage(payload);
+          });
+          idx = buffer.indexOf('\n\n');
+        }
+      }
+    } finally {
+      try {
+        reader.releaseLock();
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    const tail = buffer.trim();
+    if (tail) {
+      const payloads = extractSseDataLines(tail);
+      payloads.forEach((payload) => {
+        if (payload === '[DONE]') return;
+        handleMessage(payload);
+      });
+    }
+  }
+
+  async function runOpenAiImagineOnce(prompt, ratio, authHeader, nsfwEnabled, abortController) {
+    const payload = {
+      prompt,
+      model: 'grok-imagine-2.0',
+      n: 6,
+      size: ratio,
+      stream: true,
+      response_format: 'b64_json',
+      nsfw: Boolean(nsfwEnabled)
+    };
+
+    const res = await fetch('/v1/images/generations', {
+      method: 'POST',
+      headers: {
+        ...buildAuthHeaders(authHeader),
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payload),
+      signal: abortController.signal
+    });
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(text || `请求失败: ${res.status}`);
+    }
+
+    await consumeOpenAiImageStream(res);
+  }
+
+  async function runOpenAiImagineLoop(index, prompt, ratio, authHeader, nsfwEnabled) {
+    const abortController = new AbortController();
+    openAiControllers[index] = abortController;
+    updateActive();
+
+    while (isRunning && openAiControllers[index] === abortController && !abortController.signal.aborted) {
+      try {
+        await runOpenAiImagineOnce(prompt, ratio, authHeader, nsfwEnabled, abortController);
+      } catch (e) {
+        if (abortController.signal.aborted) break;
+        const msg = e && e.name === 'AbortError' ? '已停止' : (e.message || String(e));
+        updateError(msg);
+        toast(msg, 'error');
+        await sleep(1200);
+      }
+      await sleep(250);
+    }
+  }
+
+  function startOpenAiImagine(prompt, ratio, concurrent, authHeader, nsfwEnabled) {
+    connectionMode = 'openai';
+    stopAllConnections();
+    updateModeValue();
+
+    setStatus('connected', '生成中 (OpenAI)');
+    setButtons(true);
+    toast(`已启动 ${concurrent} 个并发任务 (OpenAI)`, 'success');
+
+    openAiControllers = [];
+    for (let i = 0; i < concurrent; i++) {
+      runOpenAiImagineLoop(i, prompt, ratio, authHeader, nsfwEnabled);
     }
   }
 
@@ -597,6 +731,15 @@
       }
     });
     sseConnections = [];
+
+    openAiControllers.forEach(ctrl => {
+      try {
+        ctrl.abort('client stop');
+      } catch (e) {
+        // ignore
+      }
+    });
+    openAiControllers = [];
     updateActive();
     updateModeValue();
   }
@@ -698,6 +841,12 @@
     try {
       taskIds = await createImagineTasks(prompt, ratio, concurrent, authHeader, nsfwEnabled);
     } catch (e) {
+      const status = e && (e.status || e.httpStatus);
+      if (status === 501) {
+        currentTaskIds = [];
+        startOpenAiImagine(prompt, ratio, concurrent, authHeader, nsfwEnabled);
+        return;
+      }
       setStatus('error', '创建任务失败');
       startBtn.disabled = false;
       isRunning = false;

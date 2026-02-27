@@ -46,6 +46,15 @@ export interface CacheSettings {
   keep_base64_cache?: boolean;
 }
 
+export interface ImageSettings {
+  timeout?: number;
+  stream_timeout?: number;
+  final_timeout?: number;
+  nsfw?: boolean;
+  medium_min_bytes?: number;
+  final_min_bytes?: number;
+}
+
 export interface PerformanceSettings {
   assets_max_concurrent?: number;
   media_max_concurrent?: number;
@@ -75,6 +84,7 @@ export interface SettingsBundle {
   grok: Required<GrokSettings>;
   token: Required<TokenSettings>;
   cache: Required<CacheSettings>;
+  image: Required<ImageSettings>;
   performance: Required<PerformanceSettings>;
   register: Required<RegisterSettings>;
 }
@@ -120,6 +130,14 @@ const DEFAULTS: SettingsBundle = {
     enable_auto_clean: true,
     limit_mb: 1024,
     keep_base64_cache: true,
+  },
+  image: {
+    timeout: 60,
+    stream_timeout: 60,
+    final_timeout: 15,
+    nsfw: true,
+    medium_min_bytes: 30000,
+    final_min_bytes: 100000,
   },
   performance: {
     assets_max_concurrent: 25,
@@ -220,6 +238,7 @@ export async function getSettings(env: Env): Promise<SettingsBundle> {
   const token = (cfg.token ?? {}) as Record<string, unknown>;
   const cache = (cfg.cache ?? {}) as Record<string, unknown>;
   const chat = (cfg.chat ?? {}) as Record<string, unknown>;
+  const image = (cfg.image ?? {}) as Record<string, unknown>;
   const video = (cfg.video ?? {}) as Record<string, unknown>;
   const usage = (cfg.usage ?? {}) as Record<string, unknown>;
   const asset = (cfg.asset ?? {}) as Record<string, unknown>;
@@ -292,6 +311,21 @@ export async function getSettings(env: Env): Promise<SettingsBundle> {
       enable_auto_clean: asBool(cache.enable_auto_clean, DEFAULTS.cache.enable_auto_clean),
       limit_mb: limitMb,
       keep_base64_cache: true,
+    },
+    image: {
+      ...DEFAULTS.image,
+      timeout: asNumber(image.timeout, DEFAULTS.image.timeout),
+      stream_timeout: asNumber(image.stream_timeout, DEFAULTS.image.stream_timeout),
+      final_timeout: asNumber(image.final_timeout, DEFAULTS.image.final_timeout),
+      nsfw: asBool(image.nsfw, DEFAULTS.image.nsfw),
+      medium_min_bytes: Math.max(
+        0,
+        Math.floor(asNumber(image.medium_min_bytes, DEFAULTS.image.medium_min_bytes)),
+      ),
+      final_min_bytes: Math.max(
+        0,
+        Math.floor(asNumber(image.final_min_bytes, DEFAULTS.image.final_min_bytes)),
+      ),
     },
     performance: {
       ...DEFAULTS.performance,

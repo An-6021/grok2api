@@ -371,6 +371,8 @@ function createImageEventStream(args: {
   const decoder = new TextDecoder();
   const responseField = responseFieldName(args.responseFormat);
   const targetIndex = args.n === 1 ? Math.floor(Math.random() * 2) : null;
+  const streamId = crypto.randomUUID();
+  const imageIdForIndex = (idx: number) => `legacy-${streamId}-${idx}`;
 
   return new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -430,6 +432,7 @@ function createImageEventStream(args: {
                     type: "image_generation.partial_image",
                     [responseField]: "",
                     index: outIndex,
+                    image_id: imageIdForIndex(outIndex),
                     progress,
                   }),
                 ),
@@ -460,6 +463,8 @@ function createImageEventStream(args: {
                 type: "image_generation.completed",
                 [responseField]: finalImages[i] ?? "",
                 index: outIndex,
+                image_id: imageIdForIndex(outIndex),
+                stage: "final",
                 usage: {
                   total_tokens: 50,
                   input_tokens: 25,
@@ -654,6 +659,9 @@ async function collectExperimentalGenerationImages(args: {
   n: number;
   cookie: string;
   settings: Awaited<ReturnType<typeof getSettings>>["grok"];
+  enableNsfw: boolean;
+  finalMinBytes: number;
+  mediumMinBytes: number;
   responseFormat: ImageResponseFormat;
   baseUrl: string;
   aspectRatio: string;
@@ -676,6 +684,9 @@ async function collectExperimentalGenerationImages(args: {
         cookie: args.cookie,
         settings: args.settings,
         aspectRatio: args.aspectRatio,
+        enableNsfw: args.enableNsfw,
+        finalMinBytes: args.finalMinBytes,
+        mediumMinBytes: args.mediumMinBytes,
       }),
   );
   const rawUrls: string[] = [];
@@ -736,6 +747,8 @@ function createSyntheticImageEventStream(args: {
   onFinish?: (result: { status: number; duration: number }) => Promise<void> | void;
 }): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
+  const streamId = crypto.randomUUID();
+  const imageIdForIndex = (idx: number) => `synthetic-${streamId}-${idx}`;
 
   return new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -753,6 +766,7 @@ function createSyntheticImageEventStream(args: {
                 type: "image_generation.partial_image",
                 [args.responseField]: "",
                 index: i,
+                image_id: imageIdForIndex(i),
                 progress: 100,
               }),
             ),
@@ -763,6 +777,8 @@ function createSyntheticImageEventStream(args: {
                 type: "image_generation.completed",
                 [args.responseField]: value,
                 index: i,
+                image_id: imageIdForIndex(i),
+                stage: "final",
                 usage: {
                   total_tokens: 50,
                   input_tokens: 25,
@@ -781,6 +797,8 @@ function createSyntheticImageEventStream(args: {
                 type: "image_generation.completed",
                 [args.responseField]: "error",
                 index: 0,
+                image_id: imageIdForIndex(0),
+                stage: "final",
                 usage: {
                   total_tokens: 0,
                   input_tokens: 0,
@@ -812,6 +830,8 @@ function createStreamErrorImageEventStream(args: {
   onFinish?: (result: { status: number; duration: number }) => Promise<void> | void;
 }): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
+  const streamId = crypto.randomUUID();
+  const imageIdForIndex = (idx: number) => `error-${streamId}-${idx}`;
   return new ReadableStream<Uint8Array>({
     async start(controller) {
       const startedAt = Date.now();
@@ -830,6 +850,8 @@ function createStreamErrorImageEventStream(args: {
               type: "image_generation.completed",
               [args.responseField]: "error",
               index: 0,
+              image_id: imageIdForIndex(0),
+              stage: "final",
               usage: {
                 total_tokens: 0,
                 input_tokens: 0,
@@ -858,6 +880,9 @@ function createExperimentalImageEventStream(args: {
   n: number;
   cookie: string;
   settings: Awaited<ReturnType<typeof getSettings>>["grok"];
+  enableNsfw: boolean;
+  finalMinBytes: number;
+  mediumMinBytes: number;
   responseFormat: ImageResponseFormat;
   responseField: ImageResponseFormat;
   baseUrl: string;
@@ -973,6 +998,9 @@ function createExperimentalImageEventStream(args: {
               cookie: args.cookie,
               settings: args.settings,
               aspectRatio: args.aspectRatio,
+              enableNsfw: args.enableNsfw,
+              finalMinBytes: args.finalMinBytes,
+              mediumMinBytes: args.mediumMinBytes,
               imageCb: async ({ index, imageId, stage, isFinal, blob, url, blobSize }) => {
                 const outIndex = toOutIndex(plan.offset, index);
                 if (outIndex < 0 || outIndex >= safeN) return;
@@ -1044,6 +1072,9 @@ function createExperimentalImageEventStream(args: {
               n: safeN,
               cookie: args.cookie,
               settings: args.settings,
+              enableNsfw: args.enableNsfw,
+              finalMinBytes: args.finalMinBytes,
+              mediumMinBytes: args.mediumMinBytes,
               responseFormat: args.responseFormat,
               baseUrl: args.baseUrl,
               aspectRatio: args.aspectRatio,
@@ -1515,6 +1546,8 @@ openAiRoutes.post("/images/generations", async (c) => {
       concurrency?: unknown;
       stream?: unknown;
       response_format?: unknown;
+      nsfw?: unknown;
+      enable_nsfw?: unknown;
     };
     const prompt = parseImagePrompt(body.prompt);
     const promptErr = nonEmptyPromptOrError(prompt);
@@ -1536,9 +1569,6 @@ openAiRoutes.post("/images/generations", async (c) => {
     }
     const concurrency = concurrencyParsed.value;
     const stream = parseImageStream(body.stream);
-    if (stream && ![1, 2].includes(n)) {
-      return c.json(openAiError(invalidStreamNMessage(), "invalid_stream_n"), 400);
-    }
 
     const settingsBundle = await getSettings(c.env);
     const configuredImageMethod = imageGenerationMethod(settingsBundle);
@@ -1546,6 +1576,15 @@ openAiRoutes.post("/images/generations", async (c) => {
       requestedModel === "grok-imagine-2.0"
         ? IMAGE_METHOD_IMAGINE_WS_EXPERIMENTAL
         : configuredImageMethod;
+    if (stream && imageMethod !== IMAGE_METHOD_IMAGINE_WS_EXPERIMENTAL && ![1, 2].includes(n)) {
+      return c.json(openAiError(invalidStreamNMessage(), "invalid_stream_n"), 400);
+    }
+    const enableNsfw =
+      body.nsfw !== undefined || body.enable_nsfw !== undefined
+        ? toBool(body.nsfw !== undefined ? body.nsfw : body.enable_nsfw)
+        : settingsBundle.image.nsfw;
+    const finalMinBytes = settingsBundle.image.final_min_bytes;
+    const mediumMinBytes = settingsBundle.image.medium_min_bytes;
     const parsedResponseFormat = resolveImageResponseFormatByMethodOrError(
       body.response_format,
       imageFormatDefault(settingsBundle),
@@ -1582,6 +1621,9 @@ openAiRoutes.post("/images/generations", async (c) => {
             n,
             cookie: experimentalCookie,
             settings: settingsBundle.grok,
+            enableNsfw,
+            finalMinBytes,
+            mediumMinBytes,
             responseFormat,
             responseField,
             baseUrl,
@@ -1824,6 +1866,9 @@ openAiRoutes.post("/images/generations", async (c) => {
             n,
             cookie: experimentalCookie,
             settings: settingsBundle.grok,
+            enableNsfw,
+            finalMinBytes,
+            mediumMinBytes,
             responseFormat,
             baseUrl,
             aspectRatio,

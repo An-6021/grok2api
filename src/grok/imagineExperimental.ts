@@ -220,7 +220,7 @@ export async function generateImagineWs(args: {
   const timeoutMs = Math.max(10_000, Number(args.timeoutMs ?? 120_000));
   const targetCount = Math.max(1, Math.floor(Number(args.n || 1)));
   const aspectRatio = resolveAspectRatio(args.aspectRatio);
-  const enableNsfw = args.enableNsfw !== undefined ? Boolean(args.enableNsfw) : true;
+  const enableNsfw = args.enableNsfw !== undefined ? Boolean(args.enableNsfw) : false;
   const finalMinBytes = Math.max(1, Math.floor(Number(args.finalMinBytes ?? 100_000)));
   const mediumMinBytes = Math.max(1, Math.floor(Number(args.mediumMinBytes ?? 30_000)));
   const requestId = crypto.randomUUID();

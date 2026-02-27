@@ -42,6 +42,23 @@ publicFastApiRoutes.get("/verify", async (c) => {
   return c.json({ status: "success" });
 });
 
+publicFastApiRoutes.get("/imagine/config", async (c) => {
+  const cfg = await getFastApiConfig(c.env);
+  const imageCfg = (cfg.image ?? {}) as Record<string, unknown>;
+
+  const toInt = (raw: unknown, fallback: number) => {
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.max(0, Math.floor(n));
+  };
+
+  return c.json({
+    final_min_bytes: toInt(imageCfg.final_min_bytes, 0),
+    medium_min_bytes: toInt(imageCfg.medium_min_bytes, 0),
+    nsfw: Boolean(imageCfg.nsfw),
+  });
+});
+
 // Phase-1: other /v1/public endpoints are intentionally not implemented.
 publicFastApiRoutes.all("/*", () => {
   return new Response(
