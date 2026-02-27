@@ -624,6 +624,31 @@ function imageGenerationMethod(settingsBundle: Awaited<ReturnType<typeof getSett
   return resolveImageGenerationMethod(settingsBundle.grok.image_generation_method);
 }
 
+async function pipeStreamToController(
+  stream: ReadableStream<Uint8Array>,
+  controller: ReadableStreamDefaultController<Uint8Array>,
+  state?: { wroteAny: boolean },
+): Promise<void> {
+  const reader = stream.getReader();
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      if (value.length) {
+        if (state) state.wroteAny = true;
+        controller.enqueue(value);
+      }
+    }
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      // ignore
+    }
+  }
+}
+
 async function collectExperimentalGenerationImages(args: {
   prompt: string;
   n: number;
@@ -1446,7 +1471,11 @@ openAiRoutes.post("/images/generations", async (c) => {
     }
 
     const settingsBundle = await getSettings(c.env);
-    const imageMethod = imageGenerationMethod(settingsBundle);
+    const configuredImageMethod = imageGenerationMethod(settingsBundle);
+    const imageMethod =
+      requestedModel === "grok-imagine-2.0"
+        ? IMAGE_METHOD_IMAGINE_WS_EXPERIMENTAL
+        : configuredImageMethod;
     const parsedResponseFormat = resolveImageResponseFormatByMethodOrError(
       body.response_format,
       imageFormatDefault(settingsBundle),
@@ -1477,7 +1506,8 @@ openAiRoutes.post("/images/generations", async (c) => {
         const experimentalToken = await selectBestToken(c.env.grok2api, requestedModel);
         if (experimentalToken) {
           const experimentalCookie = buildCookie(experimentalToken.token, cf);
-          const streamBody = createExperimentalImageEventStream({
+          const startedAt = Date.now();
+          const primary = createExperimentalImageEventStream({
             prompt: imageCallPrompt("generation", prompt),
             n,
             cookie: experimentalCookie,
@@ -1487,18 +1517,149 @@ openAiRoutes.post("/images/generations", async (c) => {
             baseUrl,
             aspectRatio,
             concurrency,
-            onFinish: async ({ status, duration }) => {
-              await addRequestLog(c.env.grok2api, {
-                ip,
-                model: requestedModel,
-                duration: Number(duration.toFixed(2)),
-                status,
-                key_name: keyName,
-                token_suffix: getTokenSuffix(experimentalToken.token),
-                error: status === 200 ? "" : "stream_error",
-              });
-            },
           });
+
+          const streamBody =
+            requestedModel === "grok-imagine-2.0"
+              ? new ReadableStream<Uint8Array>({
+                  async start(controller) {
+                    const state = { wroteAny: false };
+                    try {
+                      await pipeStreamToController(primary, controller, state);
+                      const duration = (Date.now() - startedAt) / 1000;
+                      await addRequestLog(c.env.grok2api, {
+                        ip,
+                        model: requestedModel,
+                        duration: Number(duration.toFixed(2)),
+                        status: 200,
+                        key_name: keyName,
+                        token_suffix: getTokenSuffix(experimentalToken.token),
+                        error: "",
+                      });
+                      controller.close();
+                    } catch (e) {
+                      if (!state.wroteAny) {
+                        try {
+                          const chosen = await selectBestToken(c.env.grok2api, requestedModel);
+                          if (!chosen) {
+                            const duration = (Date.now() - startedAt) / 1000;
+                            await addRequestLog(c.env.grok2api, {
+                              ip,
+                              model: requestedModel,
+                              duration: Number(duration.toFixed(2)),
+                              status: 503,
+                              key_name: keyName,
+                              token_suffix: "",
+                              error: "NO_AVAILABLE_TOKEN",
+                            });
+                            await pipeStreamToController(
+                              createStreamErrorImageEventStream({
+                                message: "No available token",
+                                responseField,
+                              }),
+                              controller,
+                            );
+                            controller.close();
+                            return;
+                          }
+
+                          const cookie = buildCookie(chosen.token, cf);
+                          const upstream = await runImageStreamCall({
+                            requestModel: requestedModel,
+                            prompt: imageCallPrompt("generation", prompt),
+                            fileIds: [],
+                            cookie,
+                            settings: settingsBundle.grok,
+                          });
+
+                          if (!upstream.ok) {
+                            const txt = await upstream.text().catch(() => "");
+                            await recordTokenFailure(
+                              c.env.grok2api,
+                              chosen.token,
+                              upstream.status,
+                              txt.slice(0, 200),
+                            );
+                            await applyCooldown(c.env.grok2api, chosen.token, upstream.status);
+
+                            const duration = (Date.now() - startedAt) / 1000;
+                            await addRequestLog(c.env.grok2api, {
+                              ip,
+                              model: requestedModel,
+                              duration: Number(duration.toFixed(2)),
+                              status: upstream.status,
+                              key_name: keyName,
+                              token_suffix: getTokenSuffix(chosen.token),
+                              error: txt.slice(0, 200) || "upstream_error",
+                            });
+
+                            await pipeStreamToController(
+                              createStreamErrorImageEventStream({
+                                message: isContentModerationMessage(txt)
+                                  ? txt.slice(0, 500)
+                                  : `Upstream ${upstream.status}`,
+                                responseField,
+                              }),
+                              controller,
+                            );
+                            controller.close();
+                            return;
+                          }
+
+                          const legacyStream = createImageEventStream({
+                            upstream,
+                            responseFormat,
+                            baseUrl,
+                            cookie,
+                            settings: settingsBundle.grok,
+                            n,
+                          });
+                          await pipeStreamToController(legacyStream, controller);
+
+                          const duration = (Date.now() - startedAt) / 1000;
+                          await addRequestLog(c.env.grok2api, {
+                            ip,
+                            model: requestedModel,
+                            duration: Number(duration.toFixed(2)),
+                            status: 200,
+                            key_name: keyName,
+                            token_suffix: getTokenSuffix(chosen.token),
+                            error: "",
+                          });
+
+                          controller.close();
+                        } catch (fallbackError) {
+                          const duration = (Date.now() - startedAt) / 1000;
+                          await addRequestLog(c.env.grok2api, {
+                            ip,
+                            model: requestedModel,
+                            duration: Number(duration.toFixed(2)),
+                            status: 500,
+                            key_name: keyName,
+                            token_suffix: getTokenSuffix(experimentalToken.token),
+                            error: fallbackError instanceof Error ? fallbackError.message : String(fallbackError),
+                          });
+                          controller.error(fallbackError);
+                        }
+                        return;
+                      }
+
+                      const duration = (Date.now() - startedAt) / 1000;
+                      await addRequestLog(c.env.grok2api, {
+                        ip,
+                        model: requestedModel,
+                        duration: Number(duration.toFixed(2)),
+                        status: 500,
+                        key_name: keyName,
+                        token_suffix: getTokenSuffix(experimentalToken.token),
+                        error: e instanceof Error ? e.message : String(e),
+                      });
+                      controller.error(e);
+                    }
+                  },
+                })
+              : primary;
+
           return new Response(streamBody, { status: 200, headers: streamHeaders() });
         }
       }
