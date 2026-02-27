@@ -157,6 +157,18 @@ export const MODEL_CONFIG: Record<string, ModelInfo> = {
     default_top_p: 0.95,
     is_image_model: true,
   },
+  "grok-imagine-2.0": {
+    grok_model: ["grok-3", "MODEL_MODE_FAST"],
+    rate_limit_model: "grok-3",
+    display_name: "Grok Imagine 2.0",
+    description: "Image generation model (v2)",
+    raw_model_path: "xai/grok-imagine-2.0",
+    default_temperature: 1.0,
+    default_max_output_tokens: 8192,
+    supported_max_output_tokens: 131072,
+    default_top_p: 0.95,
+    is_image_model: true,
+  },
   "grok-imagine-1.0-edit": {
     grok_model: ["imagine-image-edit", "MODEL_MODE_FAST"],
     rate_limit_model: "grok-3",
@@ -200,4 +212,3 @@ export function toGrokModel(model: string): { grokModel: string; mode: string; i
 export function toRateLimitModel(model: string): string {
   return MODEL_CONFIG[model]?.rate_limit_model ?? model;
 }
-

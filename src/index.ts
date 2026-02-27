@@ -118,8 +118,7 @@ app.get("/admin/login", (c) => fetchAsset(c, "/admin/pages/login.html"));
 app.get("/admin/token", (c) => fetchAsset(c, "/admin/pages/token.html"));
 app.get("/admin/config", (c) => fetchAsset(c, "/admin/pages/config.html"));
 
-// Phase-1: avoid exposing the cache UI entry to reduce confusion.
-app.get("/admin/cache", (c) => c.notFound());
+app.get("/admin/cache", (c) => fetchAsset(c, "/admin/pages/cache.html"));
 
 async function ensurePublicEnabled(c: any): Promise<{ ok: true } | { ok: false; resp: Response }> {
   const cfg = await getFastApiConfig(c.env as Env);
@@ -205,4 +204,3 @@ const handler: ExportedHandler<Env> = {
 };
 
 export default handler;
-

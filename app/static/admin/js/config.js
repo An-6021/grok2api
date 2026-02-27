@@ -13,6 +13,7 @@ const NUMERIC_FIELDS = new Set([
   'fail_threshold',
   'limit_mb',
   'save_delay_ms',
+  'apply_delay_ms',
   'usage_flush_interval_sec',
   'upload_concurrent',
   'upload_timeout',
@@ -47,6 +48,7 @@ const LOCALE_MAP = {
     "disable_memory": { title: "禁用记忆", desc: "是否默认禁用 Grok 记忆功能。" },
     "stream": { title: "流式响应", desc: "是否默认启用流式输出。" },
     "thinking": { title: "思维链", desc: "是否默认启用思维链输出。" },
+    "custom_personality_default": { title: "默认 Persona", desc: "当请求未提供 customPersonality/systemPrompt 且消息中无 system/developer 时，使用该默认提示词。" },
     "dynamic_statsig": { title: "动态指纹", desc: "是否默认启用动态生成 Statsig 指纹。" },
     "filter_tags": { title: "过滤标签", desc: "设置自动过滤 Grok 响应中的特殊标签。" }
   },
@@ -144,7 +146,9 @@ const LOCALE_MAP = {
     "label": "NSFW 配置",
     "concurrent": { title: "并发上限", desc: "批量开启 NSFW 模式时的并发请求上限。推荐 10。" },
     "batch_size": { title: "批次大小", desc: "批量开启 NSFW 模式的单批处理数量。推荐 50。" },
-    "timeout": { title: "请求超时", desc: "NSFW 开启相关请求的超时时间（秒）。推荐 60。" }
+    "timeout": { title: "请求超时", desc: "NSFW 开启相关请求的超时时间（秒）。推荐 60。" },
+    "feature_key": { title: "Feature Key", desc: "用于开启 NSFW 的 feature control key（默认 always_show_nsfw_content）。" },
+    "apply_delay_ms": { title: "应用延迟", desc: "批量开启 NSFW 成功后每个 token 之间的延迟（毫秒），用于降 QPS 防止触发风控。" }
   },
 
 

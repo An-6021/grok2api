@@ -501,6 +501,7 @@ function getTokenSuffix(token: string): string {
 }
 
 const IMAGE_GENERATION_MODEL_ID = "grok-imagine-1.0";
+const IMAGE_GENERATION_MODEL_IDS = new Set([IMAGE_GENERATION_MODEL_ID, "grok-imagine-2.0"]);
 const IMAGE_EDIT_MODEL_ID = "grok-imagine-1.0-edit";
 
 function parseImageCount(input: unknown): number {
@@ -1086,9 +1087,9 @@ function nonEmptyPromptOrError(prompt: string) {
 }
 
 function invalidGenerationModelOrError(model: string) {
-  if (model !== IMAGE_GENERATION_MODEL_ID) {
+  if (!IMAGE_GENERATION_MODEL_IDS.has(model)) {
     return {
-      message: `The model '${IMAGE_GENERATION_MODEL_ID}' is required for image generations.`,
+      message: `The model '${IMAGE_GENERATION_MODEL_ID}' or 'grok-imagine-2.0' is required for image generations.`,
       code: "model_not_supported",
     };
   }
