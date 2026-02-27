@@ -66,6 +66,19 @@ export interface ImagineWsCompleted {
   url: string;
 }
 
+export type ImagineWsStage = "preview" | "medium" | "final";
+
+export interface ImagineWsImage {
+  index: number;
+  imageId: string;
+  url: string;
+  blob: string;
+  blobSize: number;
+  stage: ImagineWsStage;
+  isFinal: boolean;
+  ext: string | null;
+}
+
 function clampProgress(input: unknown): number | null {
   const n = Number(input);
   if (!Number.isFinite(n)) return null;
@@ -122,15 +135,50 @@ function extractUrl(msg: WsJson): string {
   return "";
 }
 
-function isCompleted(msg: WsJson, progress: number | null): boolean {
-  const status = String(msg.current_status ?? msg.currentStatus ?? "")
-    .trim()
-    .toLowerCase();
-  if (status === "completed" || status === "done" || status === "success") return true;
-  return progress !== null && progress >= 100;
+function extractBlob(msg: WsJson): string {
+  for (const key of ["blob", "b64_json", "image", "data"] as const) {
+    const value = msg[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
 }
 
-function buildImagineWsPayload(prompt: string, requestId: string, aspectRatio: string): WsJson {
+const IMAGE_URL_RE = /\/images\/([a-f0-9-]+)\.(png|jpg|jpeg)/i;
+
+function parseImageIdFromUrl(url: string): { imageId: string; ext: string | null } | null {
+  const match = IMAGE_URL_RE.exec(url || "");
+  if (!match) return null;
+  return { imageId: match[1] ?? "", ext: (match[2] ?? "").toLowerCase() || null };
+}
+
+function isFinalImage(url: string, blobSize: number, finalMinBytes: number): boolean {
+  const urlLower = String(url || "")
+    .trim()
+    .toLowerCase();
+  if (urlLower.endsWith(".jpg") || urlLower.endsWith(".jpeg")) return true;
+  return blobSize > finalMinBytes;
+}
+
+function classifyStage(args: {
+  url: string;
+  blobSize: number;
+  finalMinBytes: number;
+  mediumMinBytes: number;
+}): { stage: ImagineWsStage; isFinal: boolean } {
+  const isFinal = isFinalImage(args.url, args.blobSize, args.finalMinBytes);
+  if (isFinal) return { stage: "final", isFinal: true };
+  return {
+    stage: args.blobSize > args.mediumMinBytes ? "medium" : "preview",
+    isFinal: false,
+  };
+}
+
+function buildImagineWsPayload(args: {
+  prompt: string;
+  requestId: string;
+  aspectRatio: string;
+  enableNsfw: boolean;
+}): WsJson {
   return {
     type: "conversation.item.create",
     timestamp: Date.now(),
@@ -138,16 +186,16 @@ function buildImagineWsPayload(prompt: string, requestId: string, aspectRatio: s
       type: "message",
       content: [
         {
-          requestId,
-          text: prompt,
-          type: "input_scroll",
+          requestId: args.requestId,
+          text: args.prompt,
+          type: "input_text",
           properties: {
             section_count: 0,
             is_kids_mode: false,
-            enable_nsfw: true,
+            enable_nsfw: args.enableNsfw,
             skip_upsampler: false,
             is_initial: false,
-            aspect_ratio: aspectRatio,
+            aspect_ratio: args.aspectRatio,
           },
         },
       ],
@@ -164,11 +212,19 @@ export async function generateImagineWs(args: {
   aspectRatio?: string;
   progressCb?: (progress: ImagineWsProgress) => void | Promise<void>;
   completedCb?: (completed: ImagineWsCompleted) => void | Promise<void>;
+  imageCb?: (image: ImagineWsImage) => void | Promise<void>;
+  enableNsfw?: boolean;
+  finalMinBytes?: number;
+  mediumMinBytes?: number;
 }): Promise<string[]> {
   const timeoutMs = Math.max(10_000, Number(args.timeoutMs ?? 120_000));
   const targetCount = Math.max(1, Math.floor(Number(args.n || 1)));
   const aspectRatio = resolveAspectRatio(args.aspectRatio);
+  const enableNsfw = args.enableNsfw !== undefined ? Boolean(args.enableNsfw) : true;
+  const finalMinBytes = Math.max(1, Math.floor(Number(args.finalMinBytes ?? 100_000)));
+  const mediumMinBytes = Math.max(1, Math.floor(Number(args.mediumMinBytes ?? 30_000)));
   const requestId = crypto.randomUUID();
+  let targetImageId: string | null = null;
 
   const headers = getDynamicHeaders(args.settings, "/ws/imagine/listen");
   headers.Cookie = args.cookie;
@@ -186,7 +242,16 @@ export async function generateImagineWs(args: {
   }
 
   ws.accept();
-  ws.send(JSON.stringify(buildImagineWsPayload(args.prompt, requestId, aspectRatio)));
+  ws.send(
+    JSON.stringify(
+      buildImagineWsPayload({
+        prompt: args.prompt,
+        requestId,
+        aspectRatio,
+        enableNsfw,
+      }),
+    ),
+  );
 
   const imageIndexes = new Map<string, number>();
   const finalUrls = new Map<string, string>();
@@ -204,26 +269,70 @@ export async function generateImagineWs(args: {
       const type = String(msg.type ?? "").toLowerCase();
       const status = String(msg.current_status ?? msg.currentStatus ?? "").toLowerCase();
       if (type === "error" || status === "error") {
-        const errCode = String(msg.err_code ?? msg.errCode ?? "unknown");
-        const errMessage = String(msg.err_message ?? msg.err_msg ?? msg.error ?? "unknown error");
+        const errCode = String(msg.err_code ?? msg.errCode ?? msg.error_code ?? msg.code ?? "unknown");
+        const errMessage = String(
+          msg.err_message ?? msg.err_msg ?? msg.error ?? msg.message ?? "unknown error",
+        );
         finish(new Error(`Imagine websocket error (${errCode}): ${errMessage}`));
         return;
       }
 
-      const rawImageId = String(msg.id ?? msg.imageId ?? msg.image_id ?? "");
-      const imageId = rawImageId || `image-${imageIndexes.size}`;
-      if (!imageIndexes.has(imageId)) imageIndexes.set(imageId, imageIndexes.size);
+      if (type !== "image") {
+        const progress = extractProgress(msg);
+        if (progress !== null && args.progressCb) {
+          const idx = imageIndexes.size ? 0 : 0;
+          Promise.resolve(args.progressCb({ index: idx, progress })).catch(() => {
+            // ignore callback failures
+          });
+        }
+        return;
+      }
+
+      const imageUrl = extractUrl(msg);
+      const blob = extractBlob(msg);
+      if (!imageUrl || !blob) return;
+
+      const parsed = parseImageIdFromUrl(imageUrl);
+      const fallbackId = String(msg.image_id ?? msg.imageId ?? msg.id ?? msg.imageId ?? "");
+      const imageId = (parsed?.imageId || fallbackId || `image-${imageIndexes.size}`).trim();
+      const ext = parsed?.ext ?? null;
+      const blobSize = blob.length;
+      const { stage, isFinal } = classifyStage({
+        url: imageUrl,
+        blobSize,
+        finalMinBytes,
+        mediumMinBytes,
+      });
+
+      if (targetCount === 1) {
+        if (!targetImageId) targetImageId = imageId;
+        if (imageId !== targetImageId) return;
+      }
+
+      if (!imageIndexes.has(imageId)) {
+        if (imageIndexes.size >= targetCount) return;
+        imageIndexes.set(imageId, imageIndexes.size);
+      }
       const imageIndex = imageIndexes.get(imageId) ?? 0;
 
-      const progress = extractProgress(msg);
-      if (progress !== null && args.progressCb) {
-        Promise.resolve(args.progressCb({ index: imageIndex, progress })).catch(() => {
+      if (args.imageCb) {
+        Promise.resolve(
+          args.imageCb({
+            index: imageIndex,
+            imageId,
+            url: imageUrl,
+            blob,
+            blobSize,
+            stage,
+            isFinal,
+            ext,
+          }),
+        ).catch(() => {
           // ignore callback failures
         });
       }
 
-      const imageUrl = extractUrl(msg);
-      if (imageUrl && isCompleted(msg, progress)) {
+      if (isFinal) {
         if (!finalUrls.has(imageId)) finalUrls.set(imageId, imageUrl);
         if (args.completedCb) {
           Promise.resolve(args.completedCb({ index: imageIndex, url: imageUrl })).catch(() => {

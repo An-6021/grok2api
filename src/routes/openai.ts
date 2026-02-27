@@ -861,6 +861,7 @@ function createExperimentalImageEventStream(args: {
   responseFormat: ImageResponseFormat;
   responseField: ImageResponseFormat;
   baseUrl: string;
+  size: string;
   aspectRatio: string;
   concurrency: number;
   onFinish?: (result: { status: number; duration: number }) => Promise<void> | void;
@@ -873,34 +874,70 @@ function createExperimentalImageEventStream(args: {
     async start(controller) {
       const startedAt = Date.now();
       const completedByIndex = new Map<number, string>();
+      const imageIdByIndex = new Map<number, string>();
+      const stageRankByImageId = new Map<string, number>();
+      const mediumSizeByImageId = new Map<string, number>();
 
-      const emitPartial = (index: number, progress: number) => {
-        if (index < 0 || index >= safeN) return;
-        const pct = Math.max(0, Math.min(100, Number(progress) || 0));
+      const stageRank = (stage: string) => {
+        if (stage === "final") return 2;
+        if (stage === "medium") return 1;
+        return 0;
+      };
+
+      const stripDataUri = (raw: string): string => {
+        const value = String(raw || "").trim();
+        if (!value) return "";
+        const idx = value.indexOf(",");
+        if (idx > 0) {
+          const header = value.slice(0, idx).toLowerCase();
+          if (header.includes("base64")) return value.slice(idx + 1);
+        }
+        return value;
+      };
+
+      const emitPartial = (args2: {
+        index: number;
+        imageId: string;
+        stage: "preview" | "medium";
+        partialIndex: number;
+        payload: string;
+      }) => {
+        if (args2.index < 0 || args2.index >= safeN) return;
+        if (!args2.payload || args2.payload === "error") return;
+        imageIdByIndex.set(args2.index, args2.imageId);
         controller.enqueue(
           encoder.encode(
             buildImageSse("image_generation.partial_image", {
               type: "image_generation.partial_image",
-              [args.responseField]: "",
-              index,
-              progress: pct,
+              [args.responseField]: args2.payload,
+              created_at: createdTs(),
+              size: args.size,
+              index: args2.index,
+              partial_image_index: args2.partialIndex,
+              image_id: args2.imageId,
+              stage: args2.stage,
             }),
           ),
         );
       };
 
-      const emitCompleted = (index: number, value: string) => {
-        if (index < 0 || index >= safeN) return;
-        if (completedByIndex.has(index)) return;
-        const finalValue = String(value || "").trim() || "error";
-        completedByIndex.set(index, finalValue);
+      const emitCompleted = (args2: { index: number; imageId: string; payload: string }) => {
+        if (args2.index < 0 || args2.index >= safeN) return;
+        if (completedByIndex.has(args2.index)) return;
+        const finalValue = String(args2.payload || "").trim() || "error";
+        completedByIndex.set(args2.index, finalValue);
+        imageIdByIndex.set(args2.index, args2.imageId);
         const isError = finalValue === "error";
         controller.enqueue(
           encoder.encode(
             buildImageSse("image_generation.completed", {
               type: "image_generation.completed",
               [args.responseField]: finalValue,
-              index,
+              created_at: createdTs(),
+              size: args.size,
+              index: args2.index,
+              image_id: args2.imageId,
+              stage: "final",
               usage: {
                 total_tokens: isError ? 0 : 50,
                 input_tokens: isError ? 0 : 25,
@@ -936,18 +973,47 @@ function createExperimentalImageEventStream(args: {
               cookie: args.cookie,
               settings: args.settings,
               aspectRatio: args.aspectRatio,
-              progressCb: ({ index, progress }) => {
-                emitPartial(toOutIndex(plan.offset, index), progress);
-              },
-              completedCb: async ({ index, url }) => {
-                const converted = await convertRawUrlByFormat(url, args.responseFormat, {
-                  baseUrl: args.baseUrl,
-                  cookie: args.cookie,
-                  settings: args.settings,
-                });
-                if (converted) {
-                  emitCompleted(toOutIndex(plan.offset, index), converted);
+              imageCb: async ({ index, imageId, stage, isFinal, blob, url, blobSize }) => {
+                const outIndex = toOutIndex(plan.offset, index);
+                if (outIndex < 0 || outIndex >= safeN) return;
+
+                const nextRank = stageRank(stage);
+                const prevRank = stageRankByImageId.get(imageId) ?? -1;
+                if (prevRank >= 2) return;
+                if (nextRank < prevRank) return;
+                if (nextRank === prevRank) {
+                  if (stage === "preview") return;
+                  if (stage === "medium") {
+                    const prevSize = mediumSizeByImageId.get(imageId) ?? 0;
+                    if (blobSize <= prevSize) return;
+                  }
                 }
+
+                stageRankByImageId.set(imageId, nextRank);
+                if (stage === "medium") mediumSizeByImageId.set(imageId, blobSize);
+
+                const payload =
+                  args.responseFormat === "url"
+                    ? toProxyUrl(args.baseUrl, encodeAssetPath(url))
+                    : stripDataUri(blob);
+
+                if (!payload) return;
+                if (isFinal || stage === "final") {
+                  emitCompleted({
+                    index: outIndex,
+                    imageId,
+                    payload,
+                  });
+                  return;
+                }
+
+                emitPartial({
+                  index: outIndex,
+                  imageId,
+                  stage: stage === "medium" ? "medium" : "preview",
+                  partialIndex: stage === "medium" ? 1 : 0,
+                  payload,
+                });
               },
             });
             return { plan, rawUrls };
@@ -960,14 +1026,14 @@ function createExperimentalImageEventStream(args: {
           for (let i = 0; i < rawUrls.length; i++) {
             const outIndex = toOutIndex(plan.offset, i);
             if (completedByIndex.has(outIndex)) continue;
-            const converted = await convertRawUrlByFormat(rawUrls[i] ?? "", args.responseFormat, {
+            const rawUrl = rawUrls[i] ?? "";
+            const imageId = imageIdByIndex.get(outIndex) ?? `image-${outIndex}-${crypto.randomUUID()}`;
+            const converted = await convertRawUrlByFormat(rawUrl, args.responseFormat, {
               baseUrl: args.baseUrl,
               cookie: args.cookie,
               settings: args.settings,
-            });
-            if (converted) {
-              emitCompleted(outIndex, converted);
-            }
+            }).catch(() => "");
+            if (converted) emitCompleted({ index: outIndex, imageId, payload: converted });
           }
         }
 
@@ -986,8 +1052,8 @@ function createExperimentalImageEventStream(args: {
             const selected = pickImageResults(dedupeImages(allImages), safeN);
             for (let i = 0; i < selected.length; i++) {
               const value = selected[i] ?? "error";
-              if (value !== "error") emitPartial(i, 100);
-              emitCompleted(i, value);
+              const imageId = imageIdByIndex.get(i) ?? `image-${i}-${crypto.randomUUID()}`;
+              emitCompleted({ index: i, imageId, payload: value });
             }
           } catch (fallbackErr) {
             const message = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
@@ -1004,7 +1070,8 @@ function createExperimentalImageEventStream(args: {
 
         for (let i = 0; i < safeN; i++) {
           if (!completedByIndex.has(i)) {
-            emitCompleted(i, "error");
+            const imageId = imageIdByIndex.get(i) ?? `image-${i}-${crypto.randomUUID()}`;
+            emitCompleted({ index: i, imageId, payload: "error" });
           }
         }
 
@@ -1023,7 +1090,10 @@ function createExperimentalImageEventStream(args: {
             }),
           ),
         );
-        if (!completedByIndex.has(0)) emitCompleted(0, "error");
+        if (!completedByIndex.has(0)) {
+          const imageId = imageIdByIndex.get(0) ?? `image-0-${crypto.randomUUID()}`;
+          emitCompleted({ index: 0, imageId, payload: "error" });
+        }
         if (args.onFinish) {
           await args.onFinish({ status: 500, duration: (Date.now() - startedAt) / 1000 });
         }
@@ -1508,13 +1578,14 @@ openAiRoutes.post("/images/generations", async (c) => {
           const experimentalCookie = buildCookie(experimentalToken.token, cf);
           const startedAt = Date.now();
           const primary = createExperimentalImageEventStream({
-            prompt: imageCallPrompt("generation", prompt),
+            prompt,
             n,
             cookie: experimentalCookie,
             settings: settingsBundle.grok,
             responseFormat,
             responseField,
             baseUrl,
+            size,
             aspectRatio,
             concurrency,
           });
@@ -1749,7 +1820,7 @@ openAiRoutes.post("/images/generations", async (c) => {
         const experimentalCookie = buildCookie(experimentalToken.token, cf);
         try {
           const urls = await collectExperimentalGenerationImages({
-            prompt: imageCallPrompt("generation", prompt),
+            prompt,
             n,
             cookie: experimentalCookie,
             settings: settingsBundle.grok,
