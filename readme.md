@@ -48,6 +48,10 @@ docker compose up -d
 >
 > 持久化请使用 MySQL / Redis / PostgreSQL，并设置：`SERVER_STORAGE_TYPE` 与 `SERVER_STORAGE_URL`。
 
+### Cloudflare Workers 部署
+
+参考文档：[`README.cloudflare.md`](README.cloudflare.md)
+
 <br>
 
 ## 管理面板

@@ -1,0 +1,41 @@
+name = "grok2api"
+main = "src/index.ts"
+compatibility_date = "2026-02-26"
+
+# Static assets (admin UI + public UI)
+assets = { directory = "./app/static", binding = "ASSETS" }
+
+# Hard-pin execution closer to the US to make egress locality more stable.
+# Docs: https://developers.cloudflare.com/workers/platform/placement/
+[placement]
+region = "aws:us-east-1"
+
+[[d1_databases]]
+binding = "grok2api"
+database_name = "grok2api"
+# Filled by CI / your first deployment bootstrap.
+database_id = "8317ead2-97ee-42ad-b67b-6a4cb879746b"
+migrations_dir = "migrations"
+
+[[kv_namespaces]]
+binding = "grok2api_cache"
+# Filled by CI / your first deployment bootstrap.
+id = "1ef39e4eaad940639f3715b7fb99d43f"
+
+[vars]
+# Daily reset at local midnight (default: Asia/Shanghai, UTC+8).
+# Make sure the cron below matches this offset.
+CACHE_RESET_TZ_OFFSET_MINUTES = "480"
+
+# Build info (CI will inject commit SHA into wrangler.ci.toml)
+BUILD_SHA = "dev"
+
+# Workers KV has per-value limits; keep <= 25MB.
+KV_CACHE_MAX_BYTES = "26214400"
+
+# Batch size for the daily cleanup job (deleting KV keys + D1 rows).
+KV_CLEANUP_BATCH = "200"
+
+[triggers]
+# Every day at 00:00 (Asia/Shanghai => 16:00 UTC)
+crons = ["0 16 * * *"]

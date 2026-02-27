@@ -55,3 +55,12 @@ htmlcov/
 
 # Project specific
 config.local.toml
+
+# Node / Cloudflare Workers
+node_modules/
+.wrangler/
+wrangler.ci.toml
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*

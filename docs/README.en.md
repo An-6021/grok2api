@@ -48,6 +48,10 @@ docker compose up -d
 >
 > For persistence, use MySQL / Redis / PostgreSQL and set `SERVER_STORAGE_TYPE` and `SERVER_STORAGE_URL`.
 
+### Cloudflare Workers
+
+See: [`README.cloudflare.md`](../README.cloudflare.md)
+
 <br>
 
 ## Admin Panel
