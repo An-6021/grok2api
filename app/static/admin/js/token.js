@@ -12,6 +12,7 @@ let currentBatchTaskId = null;
 let batchEventSource = null;
 let currentPage = 1;
 let pageSize = 50;
+let isImporting = false;
 
 const byId = (id) => document.getElementById(id);
 const qsa = (selector) => document.querySelectorAll(selector);
@@ -544,7 +545,11 @@ async function syncToServer() {
       },
       body: JSON.stringify(newTokens)
     });
-    if (!res.ok) showToast('保存失败', 'error');
+    const data = await readJsonResponse(res);
+    if (!res.ok || !data || data.status !== 'success') {
+      const detail = (data && (data.detail || data.message)) ? (data.detail || data.message) : `HTTP ${res.status}`;
+      showToast('保存失败: ' + detail, 'error');
+    }
   } catch (e) {
     showToast('保存错误: ' + e.message, 'error');
   }
@@ -552,42 +557,122 @@ async function syncToServer() {
 
 // Import Logic
 function openImportModal() {
+  resetImportProgress();
+  setImportControlsDisabled(false);
   openModal('import-modal');
 }
 
 function closeImportModal() {
+  if (isImporting) return;
   closeModal('import-modal', () => {
     const input = byId('import-text');
     if (input) input.value = '';
+    resetImportProgress();
   });
+}
+
+function normalizeImportToken(raw) {
+  const t = String(raw || '').trim();
+  if (!t) return '';
+  return t.startsWith('sso=') ? t.slice(4).trim() : t;
+}
+
+function setImportControlsDisabled(disabled) {
+  const closeBtn = byId('import-btn-close');
+  const cancelBtn = byId('import-btn-cancel');
+  const submitBtn = byId('import-btn-submit');
+  const poolSelect = byId('import-pool');
+  const textArea = byId('import-text');
+
+  if (closeBtn) closeBtn.disabled = disabled;
+  if (cancelBtn) cancelBtn.disabled = disabled;
+  if (poolSelect) poolSelect.disabled = disabled;
+  if (textArea) textArea.disabled = disabled;
+  if (submitBtn) {
+    submitBtn.disabled = disabled;
+    submitBtn.textContent = disabled ? '导入中...' : '开始导入';
+  }
+}
+
+function setImportProgress(processed, total) {
+  const wrap = byId('import-progress');
+  const bar = byId('import-progress-bar');
+  const label = byId('import-progress-label');
+  const percentEl = byId('import-progress-percent');
+  if (!wrap || !bar || !label || !percentEl) return;
+
+  const pct = total ? Math.floor((processed / total) * 100) : 0;
+  bar.style.width = `${Math.min(100, Math.max(0, pct))}%`;
+  label.textContent = `${processed} / ${total}`;
+  percentEl.textContent = `${pct}%`;
+  wrap.classList.remove('hidden');
+}
+
+function resetImportProgress() {
+  const wrap = byId('import-progress');
+  const bar = byId('import-progress-bar');
+  const label = byId('import-progress-label');
+  const percentEl = byId('import-progress-percent');
+  if (bar) bar.style.width = '0%';
+  if (label) label.textContent = '0 / 0';
+  if (percentEl) percentEl.textContent = '0%';
+  if (wrap) wrap.classList.add('hidden');
 }
 
 async function submitImport() {
   const pool = byId('import-pool').value.trim() || 'ssoBasic';
   const text = byId('import-text').value;
-  const lines = text.split('\n');
-  const defaultQuota = getDefaultQuotaForPool(pool);
+  const rawList = text.split('\n').map(normalizeImportToken).filter(Boolean);
+  if (rawList.length === 0) return showToast('Token 列表为空', 'error');
 
-  lines.forEach(line => {
-    const t = line.trim();
-    if (t && !flatTokens.some(ft => ft.token === t)) {
-      flatTokens.push({
-        token: t,
-        pool: pool,
-        status: 'active',
-        quota: defaultQuota,
-        note: '',
-        tags: [],
-        fail_count: 0,
-        use_count: 0,
-        _selected: false
+  const existing = new Set(flatTokens.map(t => String(t.token || '').trim()).filter(Boolean));
+  const unique = Array.from(new Set(rawList)).filter(t => !existing.has(t));
+  if (unique.length === 0) return showToast('没有新的 Token 需要导入', 'info');
+
+  if (isImporting) return;
+  isImporting = true;
+  setImportControlsDisabled(true);
+  setImportProgress(0, unique.length);
+
+  const batchSize = 200;
+  let processed = 0;
+  let inserted = 0;
+
+  try {
+    for (let i = 0; i < unique.length; i += batchSize) {
+      const chunk = unique.slice(i, i + batchSize);
+      const res = await fetch('/v1/admin/tokens/import', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...buildAuthHeaders(apiKey)
+        },
+        body: JSON.stringify({ pool, tokens: chunk })
       });
-    }
-  });
+      const data = await readJsonResponse(res);
+      if (!res.ok || !data || data.status !== 'success') {
+        throw new Error((data && data.detail) ? data.detail : `HTTP ${res.status}`);
+      }
 
-  await syncToServer();
-  closeImportModal();
-  loadData();
+      processed += chunk.length;
+      inserted += Number(data.inserted || 0);
+      setImportProgress(processed, unique.length);
+    }
+
+    showToast(`导入完成：新增 ${inserted} / ${unique.length}`, 'success');
+    closeModal('import-modal', () => {
+      const input = byId('import-text');
+      if (input) input.value = '';
+      resetImportProgress();
+    });
+    loadData();
+  } catch (e) {
+    console.error(e);
+    showToast('导入失败: ' + (e.message || '未知错误'), 'error');
+  } finally {
+    isImporting = false;
+    setImportControlsDisabled(false);
+  }
 }
 
 // Export Logic

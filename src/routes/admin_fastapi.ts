@@ -293,11 +293,18 @@ adminFastApiRoutes.post("/tokens", requireAppKeyAuth, async (c) => {
       }
     }
 
-    // D1 (and the DO-backed SQLite) does not allow explicit BEGIN/COMMIT.
-    // `db.batch([...])` already executes in a single atomic transaction.
-    const stmts: D1PreparedStatement[] = [c.env.grok2api.prepare("DELETE FROM tokens")];
+    // D1 `batch([...])` is atomic, but it has a statement-count limit. We keep
+    // the single-batch transaction for small token lists, and fall back to
+    // multi-batch writes for very large imports.
 
-    const chunkSize = 100; // keep bind params under SQLite limits and stmt count under D1 batch limits
+    const deleteStmt = c.env.grok2api.prepare("DELETE FROM tokens");
+    const insertStmts: D1PreparedStatement[] = [];
+
+    const SQLITE_MAX_VARIABLES = 999; // D1/SQLite default
+    const PLACEHOLDERS_PER_ROW = 8; // token_type + quota + tags + note ...
+    const maxRowsPerStmt = Math.max(1, Math.floor(SQLITE_MAX_VARIABLES / PLACEHOLDERS_PER_ROW));
+    const chunkSize = Math.min(120, maxRowsPerStmt); // stay under variable limit
+
     for (let i = 0; i < rows.length; i += chunkSize) {
       const chunk = rows.slice(i, i + chunkSize);
       const valuesSql = chunk.map(() => "(?,?,?,?,?,?,0,NULL,NULL,NULL,?,?)").join(",");
@@ -317,10 +324,18 @@ adminFastApiRoutes.post("/tokens", requireAppKeyAuth, async (c) => {
           r.note,
         );
       }
-      stmts.push(c.env.grok2api.prepare(sql).bind(...params));
+      insertStmts.push(c.env.grok2api.prepare(sql).bind(...params));
     }
 
-    await c.env.grok2api.batch(stmts);
+    const D1_BATCH_LIMIT = 100;
+    if (1 + insertStmts.length <= D1_BATCH_LIMIT) {
+      await c.env.grok2api.batch([deleteStmt, ...insertStmts]);
+    } else {
+      await deleteStmt.run();
+      for (let i = 0; i < insertStmts.length; i += D1_BATCH_LIMIT) {
+        await c.env.grok2api.batch(insertStmts.slice(i, i + D1_BATCH_LIMIT));
+      }
+    }
 
     return c.json({ status: "success", message: "Token 已更新" });
   } catch (e) {

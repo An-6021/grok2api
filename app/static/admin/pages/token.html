@@ -207,7 +207,7 @@
     <div class="modal-content modal-lg" id="import-modal-content">
       <div class="modal-header">
         <h3 class="modal-title">批量导入 Token</h3>
-        <button onclick="closeImportModal()" class="modal-close">
+        <button id="import-btn-close" onclick="closeImportModal()" class="modal-close">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <line x1="18" y1="6" x2="6" y2="18"></line>
             <line x1="6" y1="6" x2="18" y2="18"></line>
@@ -227,9 +227,18 @@
           <textarea id="import-text" class="geist-input font-mono h-48"
             placeholder="粘贴 Token，一行一个..."></textarea>
         </div>
+        <div id="import-progress" class="hidden space-y-2">
+          <div class="flex items-center justify-between text-xs text-[var(--accents-5)]">
+            <span id="import-progress-label">0 / 0</span>
+            <span id="import-progress-percent">0%</span>
+          </div>
+          <div class="w-full h-2 bg-gray-200 rounded">
+            <div id="import-progress-bar" class="h-2 bg-black rounded" style="width: 0%"></div>
+          </div>
+        </div>
         <div class="flex justify-end gap-2 pt-2">
-          <button onclick="closeImportModal()" class="geist-button-outline text-xs px-3">取消</button>
-          <button onclick="submitImport()" class="geist-button text-xs px-3">开始导入</button>
+          <button id="import-btn-cancel" onclick="closeImportModal()" class="geist-button-outline text-xs px-3">取消</button>
+          <button id="import-btn-submit" onclick="submitImport()" class="geist-button text-xs px-3">开始导入</button>
         </div>
       </div>
     </div>
