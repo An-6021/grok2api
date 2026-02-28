@@ -634,7 +634,7 @@ async function submitImport() {
   setImportControlsDisabled(true);
   setImportProgress(0, unique.length);
 
-  const batchSize = 200;
+  const batchSize = 100;
   let processed = 0;
   let inserted = 0;
 

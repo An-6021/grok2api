@@ -300,7 +300,10 @@ adminFastApiRoutes.post("/tokens", requireAppKeyAuth, async (c) => {
     const deleteStmt = c.env.grok2api.prepare("DELETE FROM tokens");
     const insertStmts: D1PreparedStatement[] = [];
 
-    const SQLITE_MAX_VARIABLES = 999; // D1/SQLite default
+    // Cloudflare D1 currently enforces a much lower SQL variable limit than the
+    // upstream SQLite default (999). Keep a safe cap here to avoid
+    // `D1_ERROR: too many SQL variables`.
+    const SQLITE_MAX_VARIABLES = 100;
     const PLACEHOLDERS_PER_ROW = 8; // token_type + quota + tags + note ...
     const maxRowsPerStmt = Math.max(1, Math.floor(SQLITE_MAX_VARIABLES / PLACEHOLDERS_PER_ROW));
     const chunkSize = Math.min(120, maxRowsPerStmt); // stay under variable limit
@@ -360,22 +363,20 @@ adminFastApiRoutes.post("/tokens/import", requireAppKeyAuth, async (c) => {
     const quotaRaw = Number(body.quota ?? defaultQuota);
     const quota = Number.isFinite(quotaRaw) ? Math.max(0, Math.floor(quotaRaw)) : defaultQuota;
 
-    const SQLITE_MAX_VARIABLES = 999;
-    const PLACEHOLDERS_PER_ROW = 4;
-    const chunkSize = Math.max(1, Math.floor(SQLITE_MAX_VARIABLES / PLACEHOLDERS_PER_ROW));
-
     const now = nowMs();
     let inserted = 0;
-    for (let i = 0; i < tokens.length; i += chunkSize) {
-      const chunk = tokens.slice(i, i + chunkSize);
-      const valuesSql = chunk.map(() => "(?,?,?,?)").join(",");
-      const sql = `INSERT OR IGNORE INTO tokens(token, token_type, created_time, remaining_queries) VALUES ${valuesSql}`;
-      const params: unknown[] = [];
-      for (let j = 0; j < chunk.length; j += 1) {
-        params.push(chunk[j], tokenType, now - (i + j), quota);
-      }
-      const res = await c.env.grok2api.prepare(sql).bind(...params).run();
-      inserted += Number((res as any)?.meta?.changes ?? 0);
+    const insertStmts = tokens.map((token, idx) =>
+      c.env.grok2api
+        .prepare(
+          "INSERT OR IGNORE INTO tokens(token, token_type, created_time, remaining_queries) VALUES(?,?,?,?)",
+        )
+        .bind(token, tokenType, now - idx, quota),
+    );
+
+    const D1_BATCH_LIMIT = 100;
+    for (let i = 0; i < insertStmts.length; i += D1_BATCH_LIMIT) {
+      const res = await c.env.grok2api.batch(insertStmts.slice(i, i + D1_BATCH_LIMIT));
+      for (const r of res) inserted += Number((r as any)?.meta?.changes ?? 0);
     }
 
     return c.json({
