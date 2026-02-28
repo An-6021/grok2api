@@ -230,9 +230,20 @@ export async function generateImagineWs(args: {
   headers.Cookie = args.cookie;
   headers.Origin = "https://grok.com";
   headers.Referer = IMAGINE_REFERER;
-  headers.Connection = "Upgrade";
+  // WebSocket handshake should resemble a browser request (avoid headers that a browser cannot send).
   headers.Upgrade = "websocket";
+  headers["Sec-Fetch-Dest"] = "websocket";
+  headers["Sec-Fetch-Mode"] = "websocket";
+  headers["Sec-Fetch-Site"] = "same-origin";
+  headers["Cache-Control"] = "no-cache";
+  headers.Pragma = "no-cache";
+
   delete headers["Content-Type"];
+  delete headers.Connection; // Workers will set this automatically for WebSocket upgrades.
+  delete headers.Baggage;
+  delete headers.Priority;
+  delete headers["x-statsig-id"];
+  delete headers["x-xai-request-id"];
 
   const wsResp = await fetch(IMAGINE_WS_HTTP_API, { method: "GET", headers });
   const ws = wsResp.webSocket;
