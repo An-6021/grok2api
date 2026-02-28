@@ -153,22 +153,29 @@ function collectWebSearchResults(args: {
   }
 }
 
-function formatWebSearchResults(results: WebSearchResult[]): string {
-  if (!results.length) return "";
+function formatWebSearchResultLines(results: WebSearchResult[]): string[] {
+  if (!results.length) return [];
   const lines: string[] = ["\n\n### Sources"];
   for (const r of results) {
     const title = r.title || r.url;
     const preview = r.preview ? r.preview.replace(/\s+/g, " ").trim() : "";
     lines.push(`- [${title}](${r.url})${preview ? ` — ${preview}` : ""}`);
   }
-  return `${lines.join("\n")}\n`;
+  // Strip the leading blank lines; sources will live inside <think>.
+  if (lines.length && lines[0] === "\n\n### Sources") lines[0] = "### Sources";
+  return lines;
 }
 
-function formatWebSearchThinking(queries: string[]): string {
-  const cleaned = queries.map((q) => normalizeToolQuery(q)).filter(Boolean);
-  if (!cleaned.length) return "";
+function formatWebSearchThinking(args: { queries: string[]; results: WebSearchResult[] }): string {
+  const cleaned = args.queries.map((q) => normalizeToolQuery(q)).filter(Boolean);
+  const sources = formatWebSearchResultLines(args.results);
+  if (!cleaned.length && !sources.length) return "";
   const lines = ["<think>"];
   for (const q of cleaned) lines.push(`[WebSearch] ${q}`);
+  if (sources.length) {
+    if (cleaned.length) lines.push("");
+    lines.push(...sources);
+  }
   lines.push("</think>\n");
   return `${lines.join("\n")}\n`;
 }
@@ -239,20 +246,26 @@ export function createOpenAiStreamFromGrokNdjson(
 
       const emitWebSearchResults = () => {
         if (webSearchEmitted) return;
-        const text = formatWebSearchResults(webSearchResults);
-        if (!text) return;
+        if (!showThinking) return;
+        const lines = formatWebSearchResultLines(webSearchResults);
+        if (!lines.length) return;
         webSearchEmitted = true;
 
+        const rendered = `${lines.join("\n")}\n`;
+        if (isThinking) {
+          controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, `\n${rendered}`)));
+          return;
+        }
+        controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, `<think>\n${rendered}</think>\n`)));
+      };
+
+      const flushStop = () => {
+        emitWebSearchResults();
         if (showThinking && isThinking) {
           controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, "\n</think>\n")));
           isThinking = false;
           thinkingFinished = true;
         }
-        controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, text)));
-      };
-
-      const flushStop = () => {
-        emitWebSearchResults();
         controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, "", "stop")));
         controller.enqueue(encoder.encode(makeDone()));
       };
@@ -332,6 +345,7 @@ export function createOpenAiStreamFromGrokNdjson(
             if (!grok) continue;
 
             collectWebSearchResults({ grok, into: webSearchResults, seen: webSearchSeen });
+            emitWebSearchResults();
 
             const userRespModel = grok.userResponse?.model;
             if (typeof userRespModel === "string" && userRespModel.trim()) currentModel = userRespModel.trim();
@@ -459,6 +473,11 @@ export function createOpenAiStreamFromGrokNdjson(
         }
 
         emitWebSearchResults();
+        if (showThinking && isThinking) {
+          controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, "\n</think>\n")));
+          isThinking = false;
+          thinkingFinished = true;
+        }
         controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, "", "stop")));
         controller.enqueue(encoder.encode(makeDone()));
         if (opts.onFinish) await opts.onFinish({ status: finalStatus, duration: (Date.now() - startTime) / 1000 });
@@ -565,10 +584,11 @@ export async function parseOpenAiFromGrokNdjson(
     break;
   }
 
-  const sourcesText = formatWebSearchResults(webSearchResults);
-  const thinkingText = settings.show_thinking !== false ? formatWebSearchThinking(webSearchQueries) : "";
+  const thinkingText =
+    settings.show_thinking !== false
+      ? formatWebSearchThinking({ queries: webSearchQueries, results: webSearchResults })
+      : "";
   if (thinkingText) content = `${thinkingText}${content}`;
-  if (sourcesText) content = `${content}${sourcesText}`;
 
   return {
     id: `chatcmpl-${crypto.randomUUID()}`,
