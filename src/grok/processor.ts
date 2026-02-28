@@ -8,6 +8,25 @@ function sleep(ms: number): Promise<void> {
 
 type WebSearchResult = { url: string; title: string; preview: string };
 
+function normalizeToolQuery(value: unknown): string {
+  if (typeof value !== "string") return "";
+  const q = value.trim();
+  if (!q) return "";
+  return q.replace(/\s+/g, " ");
+}
+
+function extractWebSearchQuery(grok: any): string {
+  const args = grok?.toolUsageCard?.webSearch?.args;
+  if (args && typeof args === "object") {
+    const q =
+      normalizeToolQuery((args as any).query) ||
+      normalizeToolQuery((args as any).q) ||
+      normalizeToolQuery((args as any).searchQuery);
+    if (q) return q;
+  }
+  return "";
+}
+
 async function readWithTimeout(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   ms: number,
@@ -145,6 +164,15 @@ function formatWebSearchResults(results: WebSearchResult[]): string {
   return `${lines.join("\n")}\n`;
 }
 
+function formatWebSearchThinking(queries: string[]): string {
+  const cleaned = queries.map((q) => normalizeToolQuery(q)).filter(Boolean);
+  if (!cleaned.length) return "";
+  const lines = ["<think>"];
+  for (const q of cleaned) lines.push(`[WebSearch] ${q}`);
+  lines.push("</think>\n");
+  return `${lines.join("\n")}\n`;
+}
+
 export function createOpenAiStreamFromGrokNdjson(
   grokResp: Response,
   opts: {
@@ -205,6 +233,9 @@ export function createOpenAiStreamFromGrokNdjson(
       const webSearchResults: WebSearchResult[] = [];
       const webSearchSeen = new Set<string>();
       let webSearchEmitted = false;
+
+      const webSearchQueries: string[] = [];
+      const webSearchQuerySeen = new Set<string>();
 
       const emitWebSearchResults = () => {
         if (webSearchEmitted) return;
@@ -304,6 +335,18 @@ export function createOpenAiStreamFromGrokNdjson(
 
             const userRespModel = grok.userResponse?.model;
             if (typeof userRespModel === "string" && userRespModel.trim()) currentModel = userRespModel.trim();
+
+            if (showThinking && !thinkingFinished) {
+              const query = extractWebSearchQuery(grok);
+              if (query && !webSearchQuerySeen.has(query)) {
+                webSearchQuerySeen.add(query);
+                webSearchQueries.push(query);
+
+                const prefix = isThinking ? "" : "<think>\n";
+                if (!isThinking) isThinking = true;
+                controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, `${prefix}[WebSearch] ${query}\n`)));
+              }
+            }
 
             // Video generation stream
             const videoResp = grok.streamingVideoGenerationResponse;
@@ -453,6 +496,8 @@ export async function parseOpenAiFromGrokNdjson(
   let model = requestedModel;
   const webSearchResults: WebSearchResult[] = [];
   const webSearchSeen = new Set<string>();
+  const webSearchQueries: string[] = [];
+  const webSearchQuerySeen = new Set<string>();
   for (const line of lines) {
     let data: GrokNdjson;
     try {
@@ -468,6 +513,12 @@ export async function parseOpenAiFromGrokNdjson(
     if (!grok) continue;
 
     collectWebSearchResults({ grok, into: webSearchResults, seen: webSearchSeen });
+
+    const query = extractWebSearchQuery(grok);
+    if (query && !webSearchQuerySeen.has(query)) {
+      webSearchQuerySeen.add(query);
+      webSearchQueries.push(query);
+    }
 
     const videoResp = grok.streamingVideoGenerationResponse;
     if (videoResp?.videoUrl && typeof videoResp.videoUrl === "string") {
@@ -515,6 +566,8 @@ export async function parseOpenAiFromGrokNdjson(
   }
 
   const sourcesText = formatWebSearchResults(webSearchResults);
+  const thinkingText = settings.show_thinking !== false ? formatWebSearchThinking(webSearchQueries) : "";
+  if (thinkingText) content = `${thinkingText}${content}`;
   if (sourcesText) content = `${content}${sourcesText}`;
 
   return {
