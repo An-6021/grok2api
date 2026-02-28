@@ -161,7 +161,7 @@ export async function selectBestToken(db: Env["grok2api"], model: string): Promi
          AND failed_count < ?
          AND (cooldown_until IS NULL OR cooldown_until <= ?)
          AND ${field} != 0
-       ORDER BY CASE WHEN ${field} = -1 THEN 0 ELSE 1 END, ${field} DESC, created_time ASC
+       ORDER BY CASE WHEN ${field} = -1 THEN 0 ELSE 1 END, RANDOM()
        LIMIT 1`,
       [token_type, MAX_FAILURES, now],
     );
