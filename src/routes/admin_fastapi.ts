@@ -343,6 +343,52 @@ adminFastApiRoutes.post("/tokens", requireAppKeyAuth, async (c) => {
   }
 });
 
+adminFastApiRoutes.post("/tokens/import", requireAppKeyAuth, async (c) => {
+  try {
+    const body = (await c.req.json()) as unknown;
+    if (!isPlainObject(body)) return c.json({ detail: "Invalid payload" }, 400);
+
+    const poolRaw = String(body.pool ?? "").trim();
+    const pool = poolRaw === "ssoBasic" || poolRaw === "ssoSuper" ? (poolRaw as "ssoBasic" | "ssoSuper") : null;
+    if (!pool) return c.json({ detail: "Invalid pool" }, 400);
+
+    const tokens = parseTokenList(body);
+    if (!tokens.length) return c.json({ detail: "No tokens provided" }, 400);
+
+    const tokenType: "sso" | "ssoSuper" = pool === "ssoSuper" ? "ssoSuper" : "sso";
+    const defaultQuota = defaultQuotaForPool(pool);
+    const quotaRaw = Number(body.quota ?? defaultQuota);
+    const quota = Number.isFinite(quotaRaw) ? Math.max(0, Math.floor(quotaRaw)) : defaultQuota;
+
+    const SQLITE_MAX_VARIABLES = 999;
+    const PLACEHOLDERS_PER_ROW = 4;
+    const chunkSize = Math.max(1, Math.floor(SQLITE_MAX_VARIABLES / PLACEHOLDERS_PER_ROW));
+
+    const now = nowMs();
+    let inserted = 0;
+    for (let i = 0; i < tokens.length; i += chunkSize) {
+      const chunk = tokens.slice(i, i + chunkSize);
+      const valuesSql = chunk.map(() => "(?,?,?,?)").join(",");
+      const sql = `INSERT OR IGNORE INTO tokens(token, token_type, created_time, remaining_queries) VALUES ${valuesSql}`;
+      const params: unknown[] = [];
+      for (let j = 0; j < chunk.length; j += 1) {
+        params.push(chunk[j], tokenType, now - (i + j), quota);
+      }
+      const res = await c.env.grok2api.prepare(sql).bind(...params).run();
+      inserted += Number((res as any)?.meta?.changes ?? 0);
+    }
+
+    return c.json({
+      status: "success",
+      total: tokens.length,
+      inserted,
+      skipped: Math.max(0, tokens.length - inserted),
+    });
+  } catch (e) {
+    return c.json({ detail: e instanceof Error ? e.message : String(e) }, 500);
+  }
+});
+
 // ======================================================================
 // Batch (SSE) endpoints (FastAPI compatible)
 // ======================================================================
