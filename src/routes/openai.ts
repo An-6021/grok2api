@@ -35,6 +35,8 @@ function openAiError(message: string, code: string): Record<string, unknown> {
   return { error: { message, type: "invalid_request_error", code } };
 }
 
+const IMAGINE2_DEFAULT_IMAGE_COUNT = 4;
+
 function getClientIp(req: Request): string {
   return (
     req.headers.get("CF-Connecting-IP") ||
@@ -217,6 +219,70 @@ function toProxyUrl(baseUrl: string, path: string): string {
 }
 
 type ImageResponseFormat = "url" | "base64" | "b64_json";
+
+function makeOpenAiChatChunk(args: {
+  id: string;
+  created: number;
+  model: string;
+  delta: Record<string, unknown>;
+  finishReason?: "stop" | "error" | null;
+}): string {
+  return `data: ${JSON.stringify({
+    id: args.id,
+    object: "chat.completion.chunk",
+    created: args.created,
+    model: args.model,
+    choices: [
+      {
+        index: 0,
+        delta: args.delta,
+        finish_reason: args.finishReason ?? null,
+      },
+    ],
+  })}\n\n`;
+}
+
+function makeOpenAiDone(): string {
+  return "data: [DONE]\n\n";
+}
+
+function markdownImages(urls: string[]): string {
+  return urls
+    .filter(Boolean)
+    .map((u) => `![Generated Image](${u})`)
+    .join("\n");
+}
+
+function extractLastUserPrompt(messages: unknown): string {
+  if (!Array.isArray(messages)) return "";
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i] as any;
+    const role = String(msg?.role ?? "").trim().toLowerCase();
+    if (role !== "user") continue;
+    const content = msg?.content ?? "";
+    if (typeof content === "string") return content.trim();
+    if (!Array.isArray(content)) continue;
+    const parts: string[] = [];
+    for (const item of content) {
+      if (!item) continue;
+      if (typeof item === "string") {
+        const t = item.trim();
+        if (t) parts.push(t);
+        continue;
+      }
+      if (typeof item !== "object") continue;
+      const obj = item as Record<string, unknown>;
+      const type = String(obj.type ?? "").trim().toLowerCase();
+      if (type === "text" || type === "input_text") {
+        const t = String(obj.text ?? "").trim();
+        if (t) parts.push(t);
+      }
+    }
+    const out = parts.join("\n").trim();
+    if (out) return out;
+  }
+  return "";
+}
 
 function resolveResponseFormat(raw: unknown, defaultMode: string): ImageResponseFormat | null {
   const fallback = String(defaultMode || "url").trim().toLowerCase();
@@ -1340,6 +1406,11 @@ openAiRoutes.post("/chat/completions", async (c) => {
         resolution?: string;
         preset?: string;
       };
+      // Non-standard fields (best-effort)
+      size?: unknown;
+      aspect_ratio?: unknown;
+      nsfw?: unknown;
+      enable_nsfw?: unknown;
     };
 
     requestedModel = String(body.model ?? "");
@@ -1358,6 +1429,235 @@ openAiRoutes.post("/chat/completions", async (c) => {
     const stream = Boolean(body.stream);
     const maxRetry = 3;
     let lastErr: string | null = null;
+
+    // === Grok Imagine 2.0 (official imagine websocket) ===
+    // Cherry Studio (and some clients) call /chat/completions even for image models. For grok-imagine-2.0,
+    // align with grok.com/imagine by using the imagine websocket pipeline directly (no chat fallback, no text).
+    if (requestedModel === "grok-imagine-2.0") {
+      const prompt = extractLastUserPrompt(body.messages);
+      if (!prompt) return c.json(openAiError("Missing prompt", "missing_prompt"), 400);
+
+      const ratioRaw = body.aspect_ratio ?? (body as any).aspectRatio ?? body.size;
+      const aspectRatio = resolveAspectRatio(ratioRaw);
+      const enableNsfw =
+        body.nsfw !== undefined || body.enable_nsfw !== undefined
+          ? toBool(body.nsfw !== undefined ? body.nsfw : body.enable_nsfw)
+          : settingsBundle.image.nsfw;
+
+      const baseUrl = baseUrlFromSettings(settingsBundle, origin);
+      const cf = normalizeCfCookie(settingsBundle.grok.cf_clearance ?? "");
+      const finalMinBytes = settingsBundle.image.final_min_bytes;
+      const mediumMinBytes = settingsBundle.image.medium_min_bytes;
+
+      const quota = await enforceQuota({
+        env: c.env,
+        apiAuth: c.get("apiAuth"),
+        model: requestedModel,
+        kind: "image",
+        imageCount: IMAGINE2_DEFAULT_IMAGE_COUNT,
+      });
+      if (!quota.ok) return quota.resp;
+
+      if (stream) {
+        const encoder = new TextEncoder();
+        const id = `chatcmpl-${crypto.randomUUID()}`;
+        const created = createdTs();
+
+        const streamBody = new ReadableStream<Uint8Array>({
+          async start(controller) {
+            const startedAt = Date.now();
+            let emittedAny = false;
+
+            const emit = (chunk: string) => controller.enqueue(encoder.encode(chunk));
+            emit(makeOpenAiChatChunk({ id, created, model: requestedModel, delta: { role: "assistant" } }));
+
+            const emittedImages = new Set<string>();
+
+            for (let attempt = 0; attempt < maxRetry; attempt++) {
+              const chosen = await selectBestToken(c.env.grok2api, requestedModel);
+              if (!chosen) {
+                const msg = "No available token";
+                emit(
+                  makeOpenAiChatChunk({
+                    id,
+                    created,
+                    model: requestedModel,
+                    delta: { content: msg },
+                    finishReason: "error",
+                  }),
+                );
+                emit(makeOpenAiDone());
+                await addRequestLog(c.env.grok2api, {
+                  ip,
+                  model: requestedModel,
+                  duration: Number(((Date.now() - startedAt) / 1000).toFixed(2)),
+                  status: 503,
+                  key_name: keyName,
+                  token_suffix: "",
+                  error: "NO_AVAILABLE_TOKEN",
+                });
+                controller.close();
+                return;
+              }
+
+              const cookie = buildCookie(chosen.token, cf);
+
+              try {
+                await generateImagineWs({
+                  prompt,
+                  n: IMAGINE2_DEFAULT_IMAGE_COUNT,
+                  cookie,
+                  settings: settingsBundle.grok,
+                  aspectRatio,
+                  enableNsfw,
+                  finalMinBytes,
+                  mediumMinBytes,
+                  imageCb: async ({ imageId, isFinal, stage, url }) => {
+                    if (!(isFinal || stage === "final")) return;
+                    if (!url) return;
+                    if (emittedImages.has(imageId)) return;
+                    emittedImages.add(imageId);
+                    emittedAny = true;
+
+                    const proxied = toProxyUrl(baseUrl, encodeAssetPath(url));
+                    if (!proxied) return;
+                    emit(
+                      makeOpenAiChatChunk({
+                        id,
+                        created,
+                        model: requestedModel,
+                        delta: { content: `${markdownImages([proxied])}\n` },
+                      }),
+                    );
+                  },
+                });
+
+                emit(makeOpenAiChatChunk({ id, created, model: requestedModel, delta: {}, finishReason: "stop" }));
+                emit(makeOpenAiDone());
+
+                await addRequestLog(c.env.grok2api, {
+                  ip,
+                  model: requestedModel,
+                  duration: Number(((Date.now() - startedAt) / 1000).toFixed(2)),
+                  status: 200,
+                  key_name: keyName,
+                  token_suffix: getTokenSuffix(chosen.token),
+                  error: "",
+                });
+
+                controller.close();
+                return;
+              } catch (e) {
+                const msg = e instanceof Error ? e.message : String(e);
+                lastErr = msg;
+                await recordTokenFailure(c.env.grok2api, chosen.token, 500, msg.slice(0, 200));
+                await applyCooldown(c.env.grok2api, chosen.token, 500);
+                if (emittedAny || attempt >= maxRetry - 1) break;
+              }
+            }
+
+            const message = lastErr ?? "Upstream imagine websocket error";
+            emit(
+              makeOpenAiChatChunk({
+                id,
+                created,
+                model: requestedModel,
+                delta: { content: message },
+                finishReason: "error",
+              }),
+            );
+            emit(makeOpenAiDone());
+            await addRequestLog(c.env.grok2api, {
+              ip,
+              model: requestedModel,
+              duration: Number(((Date.now() - startedAt) / 1000).toFixed(2)),
+              status: 500,
+              key_name: keyName,
+              token_suffix: "",
+              error: message,
+            });
+            controller.close();
+          },
+        });
+
+        return new Response(streamBody, {
+          status: 200,
+          headers: {
+            "Content-Type": "text/event-stream; charset=utf-8",
+            "Cache-Control": "no-cache",
+            Connection: "keep-alive",
+            "X-Accel-Buffering": "no",
+            "Access-Control-Allow-Origin": "*",
+          },
+        });
+      }
+
+      for (let attempt = 0; attempt < maxRetry; attempt++) {
+        const chosen = await selectBestToken(c.env.grok2api, requestedModel);
+        if (!chosen) return c.json(openAiError("No available token", "NO_AVAILABLE_TOKEN"), 503);
+        const cookie = buildCookie(chosen.token, cf);
+        try {
+          const urls = await collectExperimentalGenerationImages({
+            prompt,
+            n: IMAGINE2_DEFAULT_IMAGE_COUNT,
+            cookie,
+            settings: settingsBundle.grok,
+            enableNsfw,
+            finalMinBytes,
+            mediumMinBytes,
+            responseFormat: "url",
+            baseUrl,
+            aspectRatio,
+            concurrency: 1,
+          });
+          const selected = pickImageResults(urls, IMAGINE2_DEFAULT_IMAGE_COUNT);
+
+          const duration = (Date.now() - start) / 1000;
+          await addRequestLog(c.env.grok2api, {
+            ip,
+            model: requestedModel,
+            duration: Number(duration.toFixed(2)),
+            status: 200,
+            key_name: keyName,
+            token_suffix: getTokenSuffix(chosen.token),
+            error: "",
+          });
+
+          return c.json({
+            id: `chatcmpl-${crypto.randomUUID()}`,
+            object: "chat.completion",
+            created: createdTs(),
+            model: requestedModel,
+            choices: [
+              {
+                index: 0,
+                message: { role: "assistant", content: markdownImages(selected) },
+                finish_reason: "stop",
+              },
+            ],
+            usage: null,
+          });
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          lastErr = msg;
+          await recordTokenFailure(c.env.grok2api, chosen.token, 500, msg.slice(0, 200));
+          await applyCooldown(c.env.grok2api, chosen.token, 500);
+          if (attempt < maxRetry - 1) continue;
+        }
+      }
+
+      const duration = (Date.now() - start) / 1000;
+      await addRequestLog(c.env.grok2api, {
+        ip,
+        model: requestedModel,
+        duration: Number(duration.toFixed(2)),
+        status: 500,
+        key_name: keyName,
+        token_suffix: "",
+        error: lastErr ?? "unknown_error",
+      });
+      return c.json(openAiError(lastErr ?? "Upstream error", "upstream_error"), 500);
+    }
 
     // === Quota check (best-effort) ===
     // - heavy: consumes both heavy + chat
