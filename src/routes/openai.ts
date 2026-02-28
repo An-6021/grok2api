@@ -35,7 +35,9 @@ function openAiError(message: string, code: string): Record<string, unknown> {
   return { error: { message, type: "invalid_request_error", code } };
 }
 
-const IMAGINE2_DEFAULT_IMAGE_COUNT = 4;
+// Best-effort quota estimate for grok-imagine-2.0 when clients call /chat/completions.
+// The imagine websocket decides the actual number of images; we collect whatever it returns.
+const IMAGINE2_QUOTA_IMAGE_COUNT = 4;
 
 function getClientIp(req: Request): string {
   return (
@@ -1454,7 +1456,7 @@ openAiRoutes.post("/chat/completions", async (c) => {
         apiAuth: c.get("apiAuth"),
         model: requestedModel,
         kind: "image",
-        imageCount: IMAGINE2_DEFAULT_IMAGE_COUNT,
+        imageCount: IMAGINE2_QUOTA_IMAGE_COUNT,
       });
       if (!quota.ok) return quota.resp;
 
@@ -1505,13 +1507,14 @@ openAiRoutes.post("/chat/completions", async (c) => {
               try {
                 await generateImagineWs({
                   prompt,
-                  n: IMAGINE2_DEFAULT_IMAGE_COUNT,
+                  n: 0,
                   cookie,
                   settings: settingsBundle.grok,
                   aspectRatio,
                   enableNsfw,
                   finalMinBytes,
                   mediumMinBytes,
+                  timeoutMs: Math.max(10_000, Number(settingsBundle.image.timeout ?? 60) * 1000),
                   imageCb: async ({ imageId, isFinal, stage, url }) => {
                     if (!(isFinal || stage === "final")) return;
                     if (!url) return;
@@ -1597,20 +1600,23 @@ openAiRoutes.post("/chat/completions", async (c) => {
         if (!chosen) return c.json(openAiError("No available token", "NO_AVAILABLE_TOKEN"), 503);
         const cookie = buildCookie(chosen.token, cf);
         try {
-          const urls = await collectExperimentalGenerationImages({
+          const rawUrls = await generateImagineWs({
             prompt,
-            n: IMAGINE2_DEFAULT_IMAGE_COUNT,
             cookie,
             settings: settingsBundle.grok,
             enableNsfw,
             finalMinBytes,
             mediumMinBytes,
-            responseFormat: "url",
-            baseUrl,
             aspectRatio,
-            concurrency: 1,
+            n: 0,
+            timeoutMs: Math.max(10_000, Number(settingsBundle.image.timeout ?? 60) * 1000),
           });
-          const selected = pickImageResults(urls, IMAGINE2_DEFAULT_IMAGE_COUNT);
+          const selected = dedupeImages(
+            rawUrls
+              .map((u) => toProxyUrl(baseUrl, encodeAssetPath(u)))
+              .filter(Boolean),
+          );
+          if (!selected.length) throw new Error("Imagine websocket returned no completed images");
 
           const duration = (Date.now() - start) / 1000;
           await addRequestLog(c.env.grok2api, {

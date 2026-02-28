@@ -209,6 +209,7 @@ export async function generateImagineWs(args: {
   cookie: string;
   settings: GrokSettings;
   timeoutMs?: number;
+  idleTimeoutMs?: number;
   aspectRatio?: string;
   progressCb?: (progress: ImagineWsProgress) => void | Promise<void>;
   completedCb?: (completed: ImagineWsCompleted) => void | Promise<void>;
@@ -218,7 +219,10 @@ export async function generateImagineWs(args: {
   mediumMinBytes?: number;
 }): Promise<string[]> {
   const timeoutMs = Math.max(10_000, Number(args.timeoutMs ?? 120_000));
-  const targetCount = Math.max(1, Math.floor(Number(args.n || 1)));
+  const requestedN = Number(args.n);
+  const unlimited = !Number.isFinite(requestedN) || Math.floor(requestedN) <= 0;
+  const targetCount = unlimited ? Number.POSITIVE_INFINITY : Math.max(1, Math.floor(requestedN));
+  const idleTimeoutMs = Math.max(1000, Math.min(30_000, Number(args.idleTimeoutMs ?? 10_000)));
   const aspectRatio = resolveAspectRatio(args.aspectRatio);
   const enableNsfw = args.enableNsfw !== undefined ? Boolean(args.enableNsfw) : false;
   const finalMinBytes = Math.max(1, Math.floor(Number(args.finalMinBytes ?? 100_000)));
@@ -269,10 +273,19 @@ export async function generateImagineWs(args: {
 
   await new Promise<void>((resolve, reject) => {
     let finished = false;
+    let idleTimer: ReturnType<typeof setTimeout> | null = null;
 
     const onMessage = (event: MessageEvent) => {
       const msg = parseWsJson(event.data);
       if (!msg) return;
+
+      // Unlimited mode: once we have at least one final image, finish after a short idle period.
+      if (unlimited) {
+        if (idleTimer) clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => {
+          if (finalUrls.size > 0) finish();
+        }, idleTimeoutMs);
+      }
 
       const msgRequestId = String(msg.request_id ?? msg.requestId ?? "");
       if (msgRequestId && msgRequestId !== requestId) return;
@@ -315,7 +328,7 @@ export async function generateImagineWs(args: {
         mediumMinBytes,
       });
 
-      if (targetCount === 1) {
+      if (!unlimited && targetCount === 1) {
         if (!targetImageId) targetImageId = imageId;
         if (imageId !== targetImageId) return;
       }
@@ -350,7 +363,7 @@ export async function generateImagineWs(args: {
             // ignore callback failures
           });
         }
-        if (finalUrls.size >= targetCount) finish();
+        if (!unlimited && finalUrls.size >= targetCount) finish();
       }
     };
 
@@ -369,6 +382,7 @@ export async function generateImagineWs(args: {
 
     const cleanup = () => {
       clearTimeout(timer);
+      if (idleTimer) clearTimeout(idleTimer);
       ws.removeEventListener("message", onMessage as EventListener);
       ws.removeEventListener("close", onClose as EventListener);
       ws.removeEventListener("error", onError as EventListener);
