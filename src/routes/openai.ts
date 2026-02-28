@@ -1020,6 +1020,13 @@ function createExperimentalImageEventStream(args: {
                 stageRankByImageId.set(imageId, nextRank);
                 if (stage === "medium") mediumSizeByImageId.set(imageId, blobSize);
 
+                // When response_format=url, emitting intermediate preview URLs causes some OpenAI clients
+                // (and our cache layer) to treat preview+final as two separate images. Only emit the
+                // final URL in that mode.
+                if (args.responseFormat === "url" && !(isFinal || stage === "final")) {
+                  return;
+                }
+
                 const payload =
                   args.responseFormat === "url"
                     ? toProxyUrl(args.baseUrl, encodeAssetPath(url))
