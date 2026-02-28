@@ -928,22 +928,19 @@ function createExperimentalImageEventStream(args: {
         payload: string;
       }) => {
         if (args2.index < 0 || args2.index >= safeN) return;
-        if (!args2.payload || args2.payload === "error") return;
+        if (args2.payload === "error") return;
         imageIdByIndex.set(args2.index, args2.imageId);
-        controller.enqueue(
-          encoder.encode(
-            buildImageSse("image_generation.partial_image", {
-              type: "image_generation.partial_image",
-              [args.responseField]: args2.payload,
-              created_at: createdTs(),
-              size: args.size,
-              index: args2.index,
-              partial_image_index: args2.partialIndex,
-              image_id: args2.imageId,
-              stage: args2.stage,
-            }),
-          ),
-        );
+        const payload: Record<string, unknown> = {
+          type: "image_generation.partial_image",
+          created_at: createdTs(),
+          size: args.size,
+          index: args2.index,
+          partial_image_index: args2.partialIndex,
+          image_id: args2.imageId,
+          stage: args2.stage,
+        };
+        if (args2.payload) payload[args.responseField] = args2.payload;
+        controller.enqueue(encoder.encode(buildImageSse("image_generation.partial_image", payload)));
       };
 
       const emitCompleted = (args2: { index: number; imageId: string; payload: string }) => {
@@ -1020,20 +1017,18 @@ function createExperimentalImageEventStream(args: {
                 stageRankByImageId.set(imageId, nextRank);
                 if (stage === "medium") mediumSizeByImageId.set(imageId, blobSize);
 
-                // When response_format=url, emitting intermediate preview URLs causes some OpenAI clients
-                // (and our cache layer) to treat preview+final as two separate images. Only emit the
-                // final URL in that mode.
-                if (args.responseFormat === "url" && !(isFinal || stage === "final")) {
-                  return;
-                }
-
+                // When `response_format=url`, emitting preview URLs makes some OpenAI clients treat
+                // preview+final as two separate images (and causes extra cache entries). Only emit
+                // a URL for the final stage.
                 const payload =
                   args.responseFormat === "url"
-                    ? toProxyUrl(args.baseUrl, encodeAssetPath(url))
+                    ? isFinal || stage === "final"
+                      ? toProxyUrl(args.baseUrl, encodeAssetPath(url))
+                      : ""
                     : stripDataUri(blob);
 
-                if (!payload) return;
                 if (isFinal || stage === "final") {
+                  if (!payload) return;
                   emitCompleted({
                     index: outIndex,
                     imageId,
