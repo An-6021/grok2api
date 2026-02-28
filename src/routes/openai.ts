@@ -1413,6 +1413,10 @@ openAiRoutes.post("/chat/completions", async (c) => {
       aspect_ratio?: unknown;
       nsfw?: unknown;
       enable_nsfw?: unknown;
+      // Non-standard search toggles (best-effort)
+      search?: unknown;
+      disable_search?: unknown;
+      disableSearch?: unknown;
     };
 
     requestedModel = String(body.model ?? "");
@@ -1429,6 +1433,34 @@ openAiRoutes.post("/chat/completions", async (c) => {
       : [401, 429];
 
     const stream = Boolean(body.stream);
+    const parsedSearch =
+      body.search === undefined
+        ? null
+        : typeof body.search === "boolean"
+          ? body.search
+          : typeof body.search === "number"
+            ? body.search === 1
+              ? true
+              : body.search === 0
+                ? false
+                : null
+            : typeof body.search === "string"
+              ? (() => {
+                  const normalized = body.search.trim().toLowerCase();
+                  if (normalized === "true" || normalized === "1" || normalized === "yes") return true;
+                  if (normalized === "false" || normalized === "0" || normalized === "no") return false;
+                  return null;
+                })()
+              : null;
+
+    const disableSearch =
+      body.disableSearch !== undefined
+        ? toBool(body.disableSearch)
+        : body.disable_search !== undefined
+          ? toBool(body.disable_search)
+          : parsedSearch === null
+            ? false
+            : !parsedSearch;
     const maxRetry = 3;
     let lastErr: string | null = null;
 
@@ -1728,6 +1760,7 @@ openAiRoutes.post("/chat/completions", async (c) => {
           content,
           imgIds,
           imgUris,
+          disableSearch,
           ...(postId ? { postId } : {}),
           ...(isVideoModel && body.video_config ? { videoConfig: body.video_config } : {}),
           ...(customPersonality ? { customPersonality } : {}),

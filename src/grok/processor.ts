@@ -6,6 +6,8 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+type WebSearchResult = { url: string; title: string; preview: string };
+
 async function readWithTimeout(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   ms: number,
@@ -114,6 +116,35 @@ function normalizeGeneratedAssetUrls(input: unknown): string[] {
   return out;
 }
 
+function collectWebSearchResults(args: {
+  grok: any;
+  into: WebSearchResult[];
+  seen: Set<string>;
+}): void {
+  const results = args.grok?.webSearchResults?.results;
+  if (!Array.isArray(results)) return;
+  for (const item of results) {
+    const url = typeof item?.url === "string" ? item.url.trim() : "";
+    if (!url) continue;
+    if (args.seen.has(url)) continue;
+    args.seen.add(url);
+    const title = typeof item?.title === "string" ? item.title.trim() : "";
+    const preview = typeof item?.preview === "string" ? item.preview.trim() : "";
+    args.into.push({ url, title, preview });
+  }
+}
+
+function formatWebSearchResults(results: WebSearchResult[]): string {
+  if (!results.length) return "";
+  const lines: string[] = ["\n\n### Sources"];
+  for (const r of results) {
+    const title = r.title || r.url;
+    const preview = r.preview ? r.preview.replace(/\s+/g, " ").trim() : "";
+    lines.push(`- [${title}](${r.url})${preview ? ` — ${preview}` : ""}`);
+  }
+  return `${lines.join("\n")}\n`;
+}
+
 export function createOpenAiStreamFromGrokNdjson(
   grokResp: Response,
   opts: {
@@ -171,7 +202,26 @@ export function createOpenAiStreamFromGrokNdjson(
 
       let buffer = "";
 
+      const webSearchResults: WebSearchResult[] = [];
+      const webSearchSeen = new Set<string>();
+      let webSearchEmitted = false;
+
+      const emitWebSearchResults = () => {
+        if (webSearchEmitted) return;
+        const text = formatWebSearchResults(webSearchResults);
+        if (!text) return;
+        webSearchEmitted = true;
+
+        if (showThinking && isThinking) {
+          controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, "\n</think>\n")));
+          isThinking = false;
+          thinkingFinished = true;
+        }
+        controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, text)));
+      };
+
       const flushStop = () => {
+        emitWebSearchResults();
         controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, "", "stop")));
         controller.enqueue(encoder.encode(makeDone()));
       };
@@ -249,6 +299,8 @@ export function createOpenAiStreamFromGrokNdjson(
 
             const grok = (data as any).result?.response;
             if (!grok) continue;
+
+            collectWebSearchResults({ grok, into: webSearchResults, seen: webSearchSeen });
 
             const userRespModel = grok.userResponse?.model;
             if (typeof userRespModel === "string" && userRespModel.trim()) currentModel = userRespModel.trim();
@@ -344,25 +396,6 @@ export function createOpenAiStreamFromGrokNdjson(
 
             if (thinkingFinished && currentIsThinking) continue;
 
-            if (grok.toolUsageCardId && grok.webSearchResults?.results && Array.isArray(grok.webSearchResults.results)) {
-              if (currentIsThinking) {
-                if (showThinking) {
-                  let appended = "";
-                  for (const r of grok.webSearchResults.results) {
-                    const title = typeof r.title === "string" ? r.title : "";
-                    const url = typeof r.url === "string" ? r.url : "";
-                    const preview = typeof r.preview === "string" ? r.preview.replace(/\n/g, "") : "";
-                    appended += `\n- [${title}](${url} \"${preview}\")`;
-                  }
-                  token += `${appended}\n`;
-                } else {
-                  continue;
-                }
-              } else {
-                continue;
-              }
-            }
-
             let content = token;
             if (messageTag === "header") content = `\n\n${token}\n\n`;
 
@@ -382,6 +415,7 @@ export function createOpenAiStreamFromGrokNdjson(
           }
         }
 
+        emitWebSearchResults();
         controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, "", "stop")));
         controller.enqueue(encoder.encode(makeDone()));
         if (opts.onFinish) await opts.onFinish({ status: finalStatus, duration: (Date.now() - startTime) / 1000 });
@@ -417,6 +451,8 @@ export async function parseOpenAiFromGrokNdjson(
 
   let content = "";
   let model = requestedModel;
+  const webSearchResults: WebSearchResult[] = [];
+  const webSearchSeen = new Set<string>();
   for (const line of lines) {
     let data: GrokNdjson;
     try {
@@ -430,6 +466,8 @@ export async function parseOpenAiFromGrokNdjson(
 
     const grok = (data as any).result?.response;
     if (!grok) continue;
+
+    collectWebSearchResults({ grok, into: webSearchResults, seen: webSearchSeen });
 
     const videoResp = grok.streamingVideoGenerationResponse;
     if (videoResp?.videoUrl && typeof videoResp.videoUrl === "string") {
@@ -475,6 +513,9 @@ export async function parseOpenAiFromGrokNdjson(
     // For normal chat replies, the first modelResponse is enough.
     break;
   }
+
+  const sourcesText = formatWebSearchResults(webSearchResults);
+  if (sourcesText) content = `${content}${sourcesText}`;
 
   return {
     id: `chatcmpl-${crypto.randomUUID()}`,

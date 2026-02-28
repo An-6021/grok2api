@@ -206,6 +206,7 @@ export function buildConversationPayload(args: {
   content: string;
   imgIds: string[];
   imgUris: string[];
+  disableSearch?: boolean;
   postId?: string;
   videoConfig?: {
     aspect_ratio?: string;
@@ -270,7 +271,7 @@ export function buildConversationPayload(args: {
       message: content,
       fileAttachments: imgIds,
       imageAttachments: [],
-      disableSearch: false,
+      disableSearch: args.disableSearch === true,
       enableImageGeneration: true,
       returnImageBytes: false,
       returnRawGrokInXaiRequest: false,
